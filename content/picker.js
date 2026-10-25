@@ -327,6 +327,11 @@
     "form:has(#cp_form_submit_i)",
     "form:has(.iCIMS_ProfileFormTable)",
     ".iCIMS_CenteredPageContent",
+    // BambooHR (*.bamboohr.com/careers/...): Fabric form. Dropdowns are
+    // button.fab-SelectToggle (not rendered <select>s). Pin the known form id
+    // so a header search form cannot win.
+    "form#job-application-form",
+    "form:has(button.fab-SelectToggle)",
     // Custom career pages (e.g. Grid Dynamics CF7 apply-to-vacancy-form).
     "#apply-to-vacancy-form form",
     "#apply-to-vacancy-form",

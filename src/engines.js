@@ -293,6 +293,18 @@ export const ENGINES = {
     autoDiscover: true,
     note: "Uploads your resume first, then fills the candidate profile.",
   },
+  // BambooHR (*.bamboohr.com): Fabric form (#job-application-form) with native
+  // text inputs plus fab-SelectToggle dropdowns (options live on the React
+  // fiber, not in the hidden <select>). Reuses the greenhouse bundle.
+  bamboohr: {
+    id: "bamboohr",
+    label: "BambooHR",
+    mode: "select",
+    scripts: "greenhouse",
+    available: true,
+    autoDiscover: true,
+    note: "Finds the application form and fills it automatically.",
+  },
   // Custom company career pages (no known ATS host): auto-discover the richest
   // form/apply section (no manual region picking). Reuses the greenhouse
   // driver/LLM bundle; consent "I ACCEPT" prep lives in picker AF_GENERIC_PREP.

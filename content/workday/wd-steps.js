@@ -1386,6 +1386,60 @@
     return {};
   }
 
+  // The profile currently being filled. chooseSchoolResult reads address.city
+  // from here so campus picks stay next to the candidate (Kent, WA -> Seattle).
+  let activeProfile = null;
+
+  // Home-city -> campus name for universities that list several campuses and
+  // no exact "University of Washington" row. Kent is between Seattle and Tacoma;
+  // the candidate asked for Seattle, which is also UW's flagship.
+  function campusCityAliases(city, state) {
+    const c = D.norm(city);
+    if (!c) return [];
+    if (
+      /^(seattle|bellevue|kent|renton|redmond|kirkland|auburn|federal way|tukwila|seatac|sea tac|des moines|covington|maple valley|issaquah|sammamish|mercer island|shoreline|burien|newcastle|enumclaw|black diamond)$/.test(
+        c,
+      )
+    ) {
+      return ["seattle", c];
+    }
+    if (/^(tacoma|lakewood|puyallup|university place|fircrest|fife|gig harbor|spanaway)$/.test(c)) {
+      return ["tacoma", c];
+    }
+    if (
+      /^(bothell|everett|lynnwood|kenmore|woodinville|mill creek|mukilteo|edmonds|mountlake terrace)$/.test(c)
+    ) {
+      return ["bothell", c];
+    }
+    void state;
+    return [c];
+  }
+
+  // Among several School results that all name the profile's university, pick
+  // the campus next to the candidate. Never returns the first row just because
+  // it is first (that was Bothell / Mary Washington).
+  function pickNearbyCampus(school, options, loc) {
+    const texts = (options || [])
+      .map((t) => String(t || "").replace(/\s+/g, " ").trim())
+      .filter(Boolean);
+    if (!texts.length) return null;
+    const city = loc && loc.city;
+    const state = loc && (loc.state || loc.region);
+    for (const alias of campusCityAliases(city, state)) {
+      const hit = texts.find((t) => containsWordStart(D.norm(t), alias));
+      if (hit) return hit;
+    }
+    const flag = texts.find((t) => /\b(main|flagship)\s+campus\b/i.test(t));
+    if (flag) return flag;
+    // University of Washington's flagship is Seattle. Use it when the profile
+    // did not name a more specific campus and no other city matched.
+    if (/university of washington/i.test(school || "")) {
+      const sea = texts.find((t) => containsWordStart(D.norm(t), "seattle"));
+      if (sea) return sea;
+    }
+    return null;
+  }
+
   // Workday Canvas prompt rows select on POINTER events. D.clickEl only fires
   // mousedown/mouseup/click - no pointerdown - which is why clicking a highlighted
   // search-result row silently did nothing and the School prompt stayed empty.
@@ -3067,15 +3121,21 @@
           if (e && e.name === "WDAborted") throw e;
         }
         const n = D.norm(answer);
-        const hit = n && pick.ambiguous.find((t) => D.norm(t) === n);
-        searchPicks.set(want, hit || pick.ambiguous[0]);
+        const hit = n && pick.ambiguous.find((t) => D.norm(t) === n || containsWordStart(D.norm(t), n));
+        const nearby = pickNearbyCampus(value, pick.ambiguous, (activeProfile && activeProfile.address) || {});
+        searchPicks.set(want, hit || nearby || pick.ambiguous[0]);
         try {
           WD.log(`search prompt '${value}': ${pick.ambiguous.length} matches, chose ${JSON.stringify(hit || pick.ambiguous[0])} (llm=${JSON.stringify(answer)})`);
         } catch {}
         attempt--;
         continue;
       }
-      if (pick.ambiguous) pick = { row: pick.rows[0].o };
+      if (pick.ambiguous) {
+        const nearby = pickNearbyCampus(value, pick.ambiguous, (activeProfile && activeProfile.address) || {});
+        const row =
+          (nearby && pick.rows.find((x) => D.norm(x.o.textContent) === D.norm(nearby))) || pick.rows[0];
+        pick = { row: row.o };
+      }
       const match = pick.row || null;
       if (!match) {
         try {
@@ -4545,6 +4605,7 @@
   }
 
   async function fillStep(profile, options, rep) {
+    activeProfile = profile || null;
     options = options || {};
     const onlyInvalid = Array.isArray(options.onlyInvalid) ? options.onlyInvalid : null;
     throwIfAborted();
@@ -5779,14 +5840,22 @@
   // Several School results all name the profile's school (campuses of one
   // university). Let the profile-aware LLM pick; it answers with option text.
   async function chooseSchoolResult(school, options) {
+    const loc = (activeProfile && activeProfile.address) || {};
+    const nearby = pickNearbyCampus(school, options, loc);
+    if (nearby) return nearby;
+    const where = [loc.city, loc.state].filter(Boolean).join(", ");
     const cid = "wd-school-" + D.norm(school).replace(/[^a-z0-9]+/g, "-");
     const values = await requestOptionMatches([
       {
         cid,
         key: "school",
         label:
-          "School or University. Pick the result that is the candidate's school; " +
-          "when the profile names the university without a campus, pick its main/flagship campus",
+          "School or University. Pick the result that is the candidate's school. " +
+          (where
+            ? "The candidate lives in " +
+              where +
+              ". When several campuses match, pick the campus nearest that city."
+            : "When the profile names the university without a campus, pick its main/flagship campus."),
         want: school,
         kind: "select",
         required: true,

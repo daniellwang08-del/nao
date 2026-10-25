@@ -128,6 +128,7 @@ const ENGINE_SCRIPTS = {
     "content/engine/icims.js",
     "content/engine/drivers/sr-select.js",
     "content/engine/drivers/icims-dropdown.js",
+    "content/engine/drivers/fab-select.js",
     "content/engine/drivers/native.js",
     "content/engine/drivers/react-select.js",
     "content/engine/drivers/intl-tel-input.js",

@@ -11,7 +11,7 @@
   const { clean, labelText, cidFor, diag } = AF.dom;
 
   const ANCHOR_SEL =
-    'input, textarea, select, [contenteditable=""], [contenteditable="true"], [role="combobox"], .iti, .yes-no-inputs, [class*="_yesno_"], spl-radio-group';
+    'input, textarea, select, [contenteditable=""], [contenteditable="true"], [role="combobox"], .iti, .yes-no-inputs, [class*="_yesno_"], spl-radio-group, button.fab-SelectToggle';
 
   // cid -> { driver, root, spec, handle }
   const controls = new Map();

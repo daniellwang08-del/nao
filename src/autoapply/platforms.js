@@ -16,7 +16,7 @@ export const EASE_TIER = {
   smartrecruiters: 3,
   breezy: 3,
   jobvite: 3,
-  bamboohr: 4,
+  bamboohr: 3,
   generic: 4,
 };
 

@@ -272,8 +272,34 @@ async function handleWorkdayResolve(msg) {
             debugLog("[workday] WD_RESOLVE phone CC no exact match", c.cid, v);
             continue;
           }
-          const soft = portalOptions.find((o) => norm(o.text).includes(want) || want.includes(norm(o.text)));
-          if (soft) {
+          const related = portalOptions.filter((o) => {
+            const t = norm(o.text);
+            return t.includes(want) || want.includes(t);
+          });
+          const schoolish =
+            /school|university|college/i.test((src && src.key) || "") ||
+            /school|university|college/i.test((src && src.label) || "") ||
+            /school|university|college/i.test(c.label || "");
+          if (related.length === 1) {
+            values[c.cid] = related[0].text || related[0].value || related[0].id;
+            continue;
+          }
+          if (related.length > 1) {
+            // Several campuses share the university name. Do not pick the
+            // shortest (Bothell for "University of Washington"). Prefer a
+            // flagship/Seattle row; otherwise leave it for the page picker.
+            const flag =
+              related.find((o) => /\bseattle\b/i.test(o.text || "") && /washington/i.test(want)) ||
+              related.find((o) => /\b(main|flagship)\s+campus\b/i.test(o.text || ""));
+            if (flag) {
+              values[c.cid] = flag.text || flag.value || flag.id;
+              continue;
+            }
+            if (schoolish) {
+              debugLog("[workday] WD_RESOLVE school ambiguous", c.cid, v, related.map((o) => o.text));
+              continue;
+            }
+            const soft = related.slice().sort((a, b) => String(a.text || "").length - String(b.text || "").length)[0];
             values[c.cid] = soft.text || soft.value || soft.id;
             continue;
           }
@@ -289,14 +315,31 @@ async function handleWorkdayResolve(msg) {
             debugLog("[workday] WD_RESOLVE phone CC not in options", c.cid, v);
             continue;
           }
-          const contains = opts
-            .filter((o) => {
-              const t = norm(o);
-              return t.includes(want) || want.includes(t);
-            })
-            .sort((a, b) => a.length - b.length);
-          if (contains.length) {
+          const contains = opts.filter((o) => {
+            const t = norm(o);
+            return t.includes(want) || want.includes(t);
+          });
+          if (contains.length === 1) {
             values[c.cid] = contains[0];
+            continue;
+          }
+          if (contains.length > 1) {
+            const schoolish =
+              /school|university|college/i.test((src && src.key) || "") ||
+              /school|university|college/i.test((src && src.label) || "") ||
+              /school|university|college/i.test(c.label || "");
+            const flag =
+              contains.find((o) => /\bseattle\b/i.test(o) && /washington/i.test(want)) ||
+              contains.find((o) => /\b(main|flagship)\s+campus\b/i.test(o));
+            if (flag) {
+              values[c.cid] = flag;
+              continue;
+            }
+            if (schoolish) {
+              debugLog("[workday] WD_RESOLVE school ambiguous", c.cid, v, contains.slice(0, 6));
+              continue;
+            }
+            values[c.cid] = contains.slice().sort((a, b) => a.length - b.length)[0];
             continue;
           }
           debugLog("[workday] WD_RESOLVE answer not in options", c.cid, v, opts.slice(0, 6));

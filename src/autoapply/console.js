@@ -40,7 +40,7 @@ const QUEUE_SHOWN = 60;
 
 const FILL_PLATFORMS = Object.keys(EASE_TIER);
 const ALL_PLATFORMS = [...FILL_PLATFORMS, ...NEEDS_ACCOUNT, "board"].sort((a, b) => easeTier(a) - easeTier(b));
-const RECOMMENDED_FILL = FILL_PLATFORMS.filter((p) => p !== "generic" && p !== "bamboohr");
+const RECOMMENDED_FILL = FILL_PLATFORMS.filter((p) => p !== "generic");
 
 const DEFAULT_SETTINGS = {
   parallel: 3,
