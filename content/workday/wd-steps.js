@@ -620,6 +620,48 @@
     return null;
   }
 
+  // The profile's preferred first name, or "" when unset or the same as the
+  // legal first name (then the form should not claim a separate preferred name).
+  function preferredFirstName(p) {
+    const nm = (p && p.name) || {};
+    const pref = String(nm.preferred || "").trim();
+    return pref && D.norm(pref) !== D.norm(nm.first || "") ? pref : "";
+  }
+
+  const PREFERRED_NAME_RE = /preferred[\s_-]*(first|given|middle|last|family)?[\s_-]*name|nick\s*name/i;
+
+  // Workday's "I have a preferred name" checkbox (formField-preferredCheckbox),
+  // which reveals the preferred-name inputs when checked.
+  function isPreferredNameToggle(c, key, label) {
+    if (c.querySelectorAll('input[type="checkbox"]').length !== 1) return false;
+    return /preferred/i.test(key || "") || PREFERRED_NAME_RE.test(label || "");
+  }
+
+  function preferredNameInputVisible() {
+    return D.qa('[data-automation-id^="formField-"]').some((c) => {
+      if (!D.isVisible(c) || !c.querySelector('input[type="text"], input:not([type])')) return false;
+      const key = (c.getAttribute("data-automation-id") || "").replace(/^formField-/, "");
+      return PREFERRED_NAME_RE.test(`${key} ${fieldLabel(c) || ""}`);
+    });
+  }
+
+  // Check the toggle only when the candidate has a preferred first name, then
+  // wait for the inputs it reveals so this step's field scan includes them.
+  async function syncPreferredNameToggle(profile) {
+    if (!preferredFirstName(profile)) return false;
+    for (const c of D.qa('[data-automation-id^="formField-"]').filter(D.isVisible)) {
+      const key = (c.getAttribute("data-automation-id") || "").replace(/^formField-/, "");
+      if (!isPreferredNameToggle(c, key, fieldLabel(c))) continue;
+      const box = c.querySelector('input[type="checkbox"]');
+      if (box.checked) return false;
+      await commitCheckable(box, true);
+      const until = Date.now() + 3000;
+      while (Date.now() < until && !preferredNameInputVisible()) await D.delay(100);
+      return true;
+    }
+    return false;
+  }
+
   function buildValueMap(p) {
     const name = p.name || {};
     const c = p.contact || {};
@@ -637,6 +679,8 @@
       "legalName--firstName": name.first,
       "legalName--middleName": name.middle,
       "legalName--lastName": name.last,
+      "preferredName--firstName": preferredFirstName(p) || name.first,
+      "preferredName--lastName": name.last,
       addressLine1: a.line1,
       addressLine2: a.line2,
       city: a.city,
@@ -4174,6 +4218,13 @@
     }
     const e = (profile && profile.eeo) || {};
     const low = (label || "").toLowerCase();
+    const nameHay = `${key || ""} ${low}`;
+    if (PREFERRED_NAME_RE.test(nameHay)) {
+      const nm = (profile && profile.name) || {};
+      if (/last|family|surname/i.test(nameHay)) return nm.last || undefined;
+      if (/middle/i.test(nameHay)) return nm.middle || undefined;
+      return preferredFirstName(profile) || nm.first || undefined;
+    }
     if (/how did you hear|how.*hear about/.test(low) && profile && profile.howDidYouHear) {
       return String(profile.howDidYouHear);
     }
@@ -4611,6 +4662,7 @@
     throwIfAborted();
     // Wait for the step to finish mounting controls (not merely the first one).
     await waitForStepFormFieldsReady();
+    await syncPreferredNameToggle(profile);
     const valueByKey = buildValueMap(profile);
     const containers = D.qa('[data-automation-id^="formField-"]').filter(D.isVisible);
     const decisions = { skip: 0, collect: 0, harvest: 0, write: 0, experience: 0 };
@@ -4688,6 +4740,10 @@
       if (inExperiencePanel(c)) {
         decisions.experience += 1;
         skipLog("inExperiencePanel");
+        continue;
+      }
+      if (isPreferredNameToggle(c, key, label)) {
+        skipLog(preferredFirstName(profile) ? "preferredNameToggle-synced" : "preferredNameToggle-no-preferred-name");
         continue;
       }
       if (onlyInvalid) {
