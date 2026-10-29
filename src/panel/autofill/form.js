@@ -9,7 +9,7 @@ import { autofillPermissionOrigins, resolveEngine } from "../../engines.js";
 import * as storage from "../../storage.js";
 import * as tabMsg from "../../tab-messaging.js";
 import { completeJob } from "../actions/job.js";
-import { emptyAutofill, setAutofill, setState, state } from "../state.js";
+import { askConfirm, emptyAutofill, setAutofill, setState, state } from "../state.js";
 import { getWorkTab } from "../tabs.js";
 import { toast } from "../toast.js";
 import {
@@ -49,6 +49,29 @@ let writeWaiter = null;
 // Monotonic id correlating each AF_WRITE with its AF_WRITE_RESULT.
 let writePassSeq = 0;
 
+const CHECK_TITLES = {
+  already_applied: "You already applied to this job",
+  applied_company: "You already applied at this company",
+  hidden: "This job is hidden from your list",
+};
+
+/** Manual fills: ask before applying where the user already applied (NAO marks or their inbox). */
+async function confirmNotApplied() {
+  const job = state.job;
+  if (!job || !job.job_id) return true;
+  toast("Checking your applications and inbox…");
+  const check = await api
+    .applyCheck(job.job_id, { timezone: Intl.DateTimeFormat().resolvedOptions().timeZone })
+    .catch(() => null);
+  if (!check || check.ok !== false) return true;
+  const which = [job.title, job.company].filter(Boolean).join(" at ");
+  return askConfirm({
+    title: CHECK_TITLES[check.reason] || "Already applied",
+    message: `${which ? `${which}: ` : ""}${check.message || ""} Fill the application anyway?`,
+    confirmLabel: "Fill anyway",
+  });
+}
+
 /**
  * Start filling the application in the work tab. Auto-apply passes `tab` (a
  * background tab it owns) and `headless`: host access was granted up front, so
@@ -86,6 +109,9 @@ export async function startAutofill({ tab: targetTab = null, headless = false, r
       : await chrome.permissions.request({ origins: permOrigins });
     if (!granted) {
       return fail(headless ? "NAO does not have access to this site. Start auto-apply again to allow it." : "Permission to read this page was denied.");
+    }
+    if (!headless && !reached && !(await confirmNotApplied())) {
+      return { ok: false, error: "Cancelled: already applied." };
     }
     // A description page: open the application first (JobDiva does its own).
     if (engine.mode !== "workday" && engine.platform !== "jobdiva" && !reached) {

@@ -321,6 +321,9 @@ async function run(cfg) {
   const job = jobFromSession(session);
   report({ title: job.title, company: job.company });
   if (job.applied) throw skipped("Already marked applied.");
+  step("Checking your applications and inbox…");
+  const check = await api.applyCheck(jobId, { timezone: Intl.DateTimeFormat().resolvedOptions().timeZone });
+  if (check && check.ok === false) throw skipped(check.message || "You already applied here.");
   if (!job.url) throw skipped("This job has no application link.");
   if (!docsComplete(job.docs)) throw skipped("Resume or cover letter is not built yet.");
 

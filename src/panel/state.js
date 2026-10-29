@@ -141,6 +141,23 @@ export function setState(patch) {
   });
 }
 
+/** Show the confirm modal ({ title, message, confirmLabel, ... }); resolves true when confirmed. */
+export function askConfirm(modal) {
+  return new Promise((resolve) => {
+    setState({
+      modal: {
+        busy: false,
+        ...modal,
+        onConfirm: () => {
+          setState({ modal: null });
+          resolve(true);
+        },
+        onCancel: () => resolve(false),
+      },
+    });
+  });
+}
+
 export function setAutofill(patch) {
   setState({ autofill: { ...current.autofill, ...patch } });
 }

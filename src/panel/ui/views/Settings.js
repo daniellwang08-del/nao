@@ -4,7 +4,7 @@ import { changeServer, refreshAccount, savePreference, signOut, updateAccountSet
 import { showView } from "../../actions/home.js";
 import { openReport } from "../../actions/report.js";
 import { openMatchingPreferences } from "../../actions/tailor.js";
-import { setState } from "../../state.js";
+import { askConfirm, setState } from "../../state.js";
 import { toast } from "../../toast.js";
 import { ANSWER_TYPES, CHAT_STYLES } from "../Chat.js";
 import { Badge, Button, IconButton, Section, Segmented, Select, Toggle } from "../components.js";
@@ -63,21 +63,7 @@ function Row({ label, hint, children }) {
   </div>`;
 }
 
-function confirm(modal) {
-  return new Promise((resolve) => {
-    setState({
-      modal: {
-        busy: false,
-        ...modal,
-        onConfirm: () => {
-          setState({ modal: null });
-          resolve(true);
-        },
-        onCancel: () => resolve(false),
-      },
-    });
-  });
-}
+const confirm = askConfirm;
 
 function MinScore({ s }) {
   const account = s.cache && s.cache.settings ? s.cache.settings.min_match_score : null;

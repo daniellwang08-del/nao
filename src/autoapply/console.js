@@ -224,6 +224,17 @@ async function loadQueue() {
   }
 }
 
+/** Applications found in the inbox hide those companies' jobs, so sync before reading the queue. */
+async function refreshInbox() {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt === 0) log("info", "Checking your inbox for applications you already sent...");
+    const res = await api.refreshInbox(localTimezone()).catch(() => null);
+    if (!res || !res.connected || res.fresh) return;
+    if (store.phase !== "running") return;
+  }
+  log("warn", "Your inbox is still syncing. Each job is checked against it again right before applying.");
+}
+
 function pump() {
   if (store.phase !== "running") return;
   const { settings } = store;
@@ -414,6 +425,8 @@ async function start() {
   } catch {
     set({ windowId: null });
   }
+  await refreshInbox();
+  if (store.phase !== "running") return;
   await loadQueue();
   if (!queueOf(store).length && !Object.keys(store.runs).length) {
     set({ phase: "idle" });
