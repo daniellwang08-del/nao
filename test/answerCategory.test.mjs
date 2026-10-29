@@ -31,10 +31,22 @@ test("citizenship and export-control status are never cached as work authorizati
   }
 });
 
-test("work authorization and other categories still cache", () => {
-  assert.equal(answerCategory("Are you legally authorized to work in the United States?"), "work_auth");
-  assert.equal(answerCategory("Do you have the right to work in the UK?"), "work_auth");
-  assert.equal(answerCategory("Will you now or in the future require sponsorship?"), "sponsorship");
+test("work authorization and sponsorship are never cached (opposite answers share keywords)", () => {
+  for (const label of [
+    "Are you legally authorized to work in the United States?",
+    "Are you legally authorized to work in the United States without sponsorship?",
+    "Do you have the right to work in the UK?",
+    "Will you now or in the future require sponsorship?",
+    "Will you require visa support to work here?",
+    "Are you eligible to work for any employer?",
+  ]) {
+    assert.equal(answerCategory(label), null, label);
+  }
+});
+
+test("stable identity categories still cache", () => {
   assert.equal(answerCategory("Graduation year"), null);
   assert.equal(answerCategory("Gender"), "gender");
+  assert.equal(answerCategory("Are you a protected veteran?"), "veteran");
+  assert.equal(answerCategory("How did you hear about us?"), "how_hear");
 });

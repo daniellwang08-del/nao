@@ -39,6 +39,14 @@ test("hotkey formatting has no symbols", () => {
   assert.ok(label.endsWith("K"));
 });
 
+test("cached work-authorization and sponsorship answers are purged, never replayed", async () => {
+  await chrome.storage.local.set({ answers_u1_workable: { work_auth: "No", sponsorship: "No", gender: "Male" } });
+  assert.deepEqual(await storage.getAnswerCache("u1", "workable"), { gender: "Male" });
+  assert.deepEqual((await chrome.storage.local.get("answers_u1_workable")).answers_u1_workable, { gender: "Male" });
+  await storage.saveAnswerPairs("u1", "workable", { work_auth: "No", sponsorship: "Yes", veteran: "No" });
+  assert.deepEqual(await storage.getAnswerCache("u1", "workable"), { gender: "Male", veteran: "No" });
+});
+
 test("legacy job catalog keys are dropped", async () => {
   await chrome.storage.local.set({ jobsCatalog_u1: [1], jobsCatalogMeta_u1: {}, keep: 1 });
   await storage.dropLegacyCatalog();

@@ -566,21 +566,6 @@ export async function prepareWorkable(tabId) {
       sponsorship: eeo.sponsorship,
     });
   } catch {}
-  // Seed platform answer-cache from profile EEO so sponsorship radios are
-  // clicked in prepareCachedAnswers before extract (first visit has no store).
-  try {
-    const userId = state.user && state.user.user_id;
-    if (userId != null && typeof eeo.sponsorship === "boolean") {
-      const pairs = (await storage.getAnswerCache(userId, "workable")) || {};
-      if (!pairs.sponsorship) {
-        pairs.sponsorship = eeo.sponsorship ? "Yes" : "No";
-        await storage.saveAnswerPairs(userId, "workable", { sponsorship: pairs.sponsorship });
-        debugLog("[autofill] prepareWorkable seeded sponsorship cache:", pairs.sponsorship);
-      }
-    }
-  } catch (err) {
-    console.warn("[autofill] prepareWorkable sponsorship seed failed", err && err.message);
-  }
   await tabSend(tabId, { type: "AF_WB_PREP", experience, education, address });
   await delay(600);
 }

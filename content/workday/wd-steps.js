@@ -743,6 +743,8 @@
         ? "Yes, I have a disability"
         : "No, I do not have a disability and have not had one in the past";
     }
+    const eligibility = workEligibilityAnswer(low, e);
+    if (eligibility) return eligibility;
     const RULES = [
       // Self-Identify (CC-305) "Name" - a standalone full-name field. The keyed
       // legalName--first/last fields are resolved by buildValueMap and never reach
@@ -751,9 +753,8 @@
       // Order-independent: catches "previously been employed", "been employed by
       // <Company> previously", "ever worked for", "worked here before", etc. Note:
       // no \b after employ/work - "employ" must match the stem in "employed".
-      [/(previously|formerly|prior|before|ever)[\s\S]{0,40}?(employ|work)/i, "No"],
-      [/(employ|work)[\s\S]{0,40}?(previously|formerly|prior|before)/i, "No"],
-      [/legally (eligible|authorized) to work|authorized to work|legal right to work/i, "Yes"],
+      [/\b(previously|formerly|prior|before|ever)\b[\s\S]{0,40}?(employ|work)/i, "No"],
+      [/(employ|work)[\s\S]{0,40}?\b(previously|formerly|prior|before)\b/i, "No"],
       [/relatives employed|relative.*employed by/i, "No"],
       [/contractual restrictions|restrict your employment|non-compete|non-disclosure/i, "No"],
       [/non-solicitation|prospect for business/i, "No"],
@@ -818,6 +819,37 @@
       /unauthorized assistance during the interview/.test(low) ||
       /personally participate in all interviews/.test(low)
     );
+  }
+
+  // "Yes" / "No" for work-authorization and sponsorship questions, decided by the
+  // wording: "authorized to work (without sponsorship)" is Yes for an authorized
+  // candidate, "will you require sponsorship" is No. Must run before the
+  // previously-employed rules ("authorized to work ... before you start" is not
+  // an employment-history question). Mirrors work_eligibility_answer on the server.
+  const WORK_AUTH_Q_RE =
+    /authori[sz](?:ed|ation)\s+(?:to\s+)?(?:work|be\s+employed|for\s+employment)|(?:work|employment)\s+authori[sz]ation|eligib(?:le|ility)\s+(?:to\s+work|for\s+employment|to\s+be\s+employed)|right\s+to\s+work|legally\s+(?:able|permitted|allowed|entitled|eligible|authori[sz]ed)\s+to\s+work|(?:able|permitted)\s+to\s+(?:legally\s+)?work\b[\s\S]{0,80}\bwithout\b/i;
+  const WITHOUT_SPONSORSHIP_RE =
+    /without\s+(?:the\s+)?(?:need\s+(?:for|of)\s+|requiring\s+|any\s+|current\s+or\s+future\s+)?(?:visa\s+|employer\s+|company\s+|immigration\s+|work\s+)?(?:sponsor|visa)/i;
+  const SPONSORSHIP_NEED_RE =
+    /\b(?:requires?|required|need|needs|needed|requiring)\b[\s\S]{0,80}\b(?:sponsor\w*|visa|immigration|work\s+permit|h-?1b)|\bsponsor\w*\b[\s\S]{0,40}\b(?:requires?|need)/i;
+  const NEGATED_AUTH_RE = /\bnot\s+(?:currently\s+|legally\s+)?(?:authori[sz]ed|eligible)/i;
+  const NON_US_COUNTRY_RE =
+    /\bcanada\b|\bunited kingdom\b|\bu\.?k\.?\b|\bbritain\b|\beurope\b|\beu\b|\bgermany\b|\bfrance\b|\bireland\b|\bnetherlands\b|\bspain\b|\bitaly\b|\bpoland\b|\bindia\b|\baustralia\b|\bnew zealand\b|\bmexico\b|\bbrazil\b|\bsingapore\b|\bjapan\b|\bchina\b|\bisrael\b/i;
+  const US_COUNTRY_RE = /\bunited states\b|\bu\.?\s?s\.?(?:a\.?)?\b|\bamerica\b/i;
+
+  function workEligibilityAnswer(labelOrLow, eeo) {
+    const low = String(labelOrLow || "").toLowerCase();
+    if (!low || NEGATED_AUTH_RE.test(low)) return undefined;
+    if (NON_US_COUNTRY_RE.test(low) && !US_COUNTRY_RE.test(low)) return undefined;
+    const e = eeo || {};
+    const authorized = e.authorized !== false;
+    const needsSponsorship = e.sponsorship === true;
+    if (WITHOUT_SPONSORSHIP_RE.test(low) && (WORK_AUTH_Q_RE.test(low) || /\bwork\b/.test(low))) {
+      return authorized && !needsSponsorship ? "Yes" : "No";
+    }
+    if (SPONSORSHIP_NEED_RE.test(low)) return needsSponsorship ? "Yes" : "No";
+    if (WORK_AUTH_Q_RE.test(low)) return authorized ? "Yes" : "No";
+    return undefined;
   }
 
   // Application-process accommodation asks (not CC-305 disability self-ID).
@@ -4243,9 +4275,8 @@
     if (isDisabilitySelfIdLabel(low) && e.disability != null) {
       return e.disability ? "I have a disability" : "I do not have a disability";
     }
-    if (/sponsorship|immigration filing|visa sponsorship|open work permit|permanent residency|do you now or in the future require|will you now or in the future require/.test(low) && e.sponsorship != null) {
-      return e.sponsorship ? "Yes" : "No";
-    }
+    const eligibility = workEligibilityAnswer(low, e);
+    if (eligibility) return eligibility;
     if (/highest degree|degree attained/.test(low) && Array.isArray(profile && profile.education)) {
       for (let i = profile.education.length - 1; i >= 0; i--) {
         const deg = profile.education[i] && profile.education[i].degree;
@@ -6162,8 +6193,10 @@
     if (/\bgender\b|\bsex\b/.test(low) && e.gender) return pick(e.gender);
     if (/sexual orientation|lgbtq/.test(low)) return pick(e.sexualOrientation || "I don't wish to answer");
     if (/what is your race|race\/ethnicity|ethnicity|\brace\b/.test(low) && e.ethnicity) return pick(e.ethnicity);
-    if (/sponsorship|immigration filing|visa sponsorship|open work permit|permanent residency|do you now or in the future require|will you now or in the future require|might you in the future require/.test(low) && e.sponsorship != null) {
-      return pick(e.sponsorship ? "Yes" : "No");
+    const eligibility = workEligibilityAnswer(low, e);
+    if (eligibility) {
+      const m = pick(eligibility);
+      if (m) return m;
     }
     if (/highest degree|degree attained/.test(low) && profile && Array.isArray(profile.education)) {
       for (const ed of profile.education) {

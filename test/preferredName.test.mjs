@@ -10,7 +10,8 @@ const grab = (name) => {
 };
 const regexLine = src.split("\n").find((l) => l.includes("const PREFERRED_NAME_RE ="));
 const D = { norm: (s) => String(s || "").toLowerCase().replace(/\s+/g, " ").trim() };
-const stub = "const isSkillsField = () => false; const isDisabilitySelfIdLabel = () => false;";
+const eligibility = src.slice(src.indexOf("  const WORK_AUTH_Q_RE"), src.indexOf("  // Application-process accommodation asks"));
+const stub = `const isSkillsField = () => false; const isDisabilitySelfIdLabel = () => false;\n${eligibility}`;
 const { preferredFirstName, profileWantForField } = new Function(
   "D",
   `${regexLine}\n${stub}\n${grab("preferredFirstName")}\n${grab("profileWantForField")}\n` +

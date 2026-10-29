@@ -246,17 +246,28 @@ export function askHotkeyFromKeyboardEvent(e) {
 
 const answerCacheKey = (userId, platform) => `answers_${userId || "anon"}_${platform || "generic"}`;
 
+// Older versions cached these; one value cannot serve both "are you authorized"
+// and "do you require sponsorship", so stored copies are dropped, never replayed.
+const RETIRED_ANSWER_KEYS = ["work_auth", "sponsorship"];
+
 export async function getAnswerCache(userId, platform) {
   const key = answerCacheKey(userId, platform);
   const v = (await LOCAL.get(key))[key];
-  return v && typeof v === "object" ? v : {};
+  if (!v || typeof v !== "object") return {};
+  if (!RETIRED_ANSWER_KEYS.some((k) => k in v)) return v;
+  const kept = { ...v };
+  for (const k of RETIRED_ANSWER_KEYS) delete kept[k];
+  await LOCAL.set({ [key]: kept });
+  return kept;
 }
 
 export async function saveAnswerPairs(userId, platform, pairs) {
   if (!pairs || !Object.keys(pairs).length) return;
   const key = answerCacheKey(userId, platform);
   const next = { ...(await getAnswerCache(userId, platform)) };
-  for (const [k, v] of Object.entries(pairs)) if (k && v) next[k] = String(v);
+  for (const [k, v] of Object.entries(pairs)) {
+    if (k && v && !RETIRED_ANSWER_KEYS.includes(k)) next[k] = String(v);
+  }
   await LOCAL.set({ [key]: next });
 }
 
