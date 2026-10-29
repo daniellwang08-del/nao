@@ -16,6 +16,7 @@ import { handleAutofillMessage, startAutofill } from "../panel/autofill/index.js
 import { setFocusGate } from "../panel/autofill/shared.js";
 import { emptyAutofill, setState, state } from "../panel/state.js";
 import { AGGREGATOR_HOSTS, NEEDS_ACCOUNT, applyPageUrl, hostOf } from "./platforms.js";
+import { keepAwake, wakeTab } from "./wake.js";
 
 const AA_TAB_PREFIX = "aaTab:";
 const LOAD_TIMEOUT_MS = 45_000;
@@ -131,9 +132,11 @@ function waitForLoad(tabId, timeoutMs) {
 async function openTab(url, windowId) {
   const tab = await chrome.tabs.create({ url, active: false, ...(windowId != null ? { windowId } : {}) });
   ownTabId = tab.id;
+  keepAwake(tab.id);
   await chrome.storage.session.set({ [AA_TAB_PREFIX + tab.id]: { jobId, at: Date.now() } });
   report({ tabId: tab.id });
   await waitForLoad(tab.id, LOAD_TIMEOUT_MS);
+  await wakeTab(tab.id);
   // Client-rendered ATS pages mount the form after "complete".
   await delay(2500);
   return chrome.tabs.get(tab.id);
@@ -299,7 +302,8 @@ async function boot() {
     cache = { ...(cache || {}), settings };
   }
   setState({ ...prefs, user, cache, autoApply: true, view: "job" });
-  setFocusGate((tabId) => (console_ ? console_.focusTab(tabId) : Promise.resolve()));
+  // The user keeps working in another tab: wake the page, never bring it forward.
+  setFocusGate(wakeTab);
   chrome.runtime.onMessage.addListener((msg, sender) => {
     if (!msg || typeof msg.type !== "string") return;
     if (msg.type === "AA_SUBMITTED") {
@@ -338,7 +342,7 @@ async function run(cfg) {
     const reached = await reachApplicationForm(tab.id, {
       onStep: step,
       waitMs: 25_000,
-      focus: (id) => (console_ ? console_.focusTab(id) : null),
+      focus: wakeTab,
     });
     if (!reached.tab) throw new Stop("failed", "The application tab was closed.");
     tab = reached.tab;

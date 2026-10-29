@@ -14,6 +14,7 @@ import {
   debugLog,
   delay,
   downloadApplicationResume,
+  focusGate,
   generatePortalPassword,
   getAutofillProfile,
   submitAllowed,
@@ -576,12 +577,18 @@ function waitWorkdayFill(timeoutMs = 180000) {
 // Give the application tab real OS focus so the page's window 'focus' fires and
 // flushes deferred commits, then ask the engine to flush as an explicit backstop.
 async function focusPageAndFlush(tabId) {
-  try {
-    const tab = await chrome.tabs.get(tabId);
-    await chrome.windows.update(tab.windowId, { focused: true });
-    await chrome.tabs.update(tabId, { active: true });
-  } catch {
-    /* tab/window may be gone */
+  // Auto-apply sets a gate that wakes the background tab without bringing it forward.
+  const gate = focusGate();
+  if (gate) {
+    await Promise.resolve(gate(tabId)).catch(() => {});
+  } else {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      await chrome.windows.update(tab.windowId, { focused: true });
+      await chrome.tabs.update(tabId, { active: true });
+    } catch {
+      /* tab/window may be gone */
+    }
   }
   await delay(450); // let the focus event settle (may still be false with side panel open)
   const flush = await tabSend(tabId, { type: "WD_FLUSH" }, 0);

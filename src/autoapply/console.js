@@ -33,7 +33,6 @@ import { DEFAULT_SUBMIT_PLATFORMS, EASE_TIER, NEEDS_ACCOUNT, PLATFORM_LABEL, ran
 const SETTINGS_KEY = "aaSettings";
 const HISTORY_KEY = "aaHistory";
 const HISTORY_MAX_AGE_MS = 45 * 24 * 60 * 60 * 1000;
-const FOCUS_HOLD_MS = 4500;
 const READY_PAGES = 3;
 const LOG_MAX = 120;
 const QUEUE_SHOWN = 60;
@@ -107,7 +106,6 @@ function useNow(fast) {
   return now;
 }
 
-const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 const label = (p) => PLATFORM_LABEL[p] || p || "Unknown site";
 
 function log(tone, text) {
@@ -153,7 +151,6 @@ async function saveHistory(history) {
 
 // ── runner hooks (called from runner iframes) ───────────────────────────────
 
-let focusChain = Promise.resolve();
 const otpWaiting = new Set();
 const frames = new Map();
 const timers = new Map();
@@ -171,21 +168,6 @@ window.naoAutoApply = {
   },
   finish(jobId, outcome) {
     void finishRun(jobId, outcome);
-  },
-  // Some engines need the page to have OS focus for a moment; runs take turns.
-  focusTab(tabId) {
-    const turn = focusChain.then(async () => {
-      try {
-        const tab = await chrome.tabs.get(tabId);
-        await chrome.windows.update(tab.windowId, { focused: true });
-        await chrome.tabs.update(tabId, { active: true });
-      } catch {
-        /* tab or window closed */
-      }
-      await delay(350);
-    });
-    focusChain = turn.then(() => delay(FOCUS_HOLD_MS));
-    return turn;
   },
   otpWait(jobId, on) {
     if (on) otpWaiting.add(jobId);
