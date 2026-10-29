@@ -79,6 +79,7 @@ let store = {
   windowId: null,
   log: [],
   modal: null,
+  sessionStartedAt: 0,
 };
 const listeners = new Set();
 
@@ -154,9 +155,23 @@ async function saveHistory(history) {
 const otpWaiting = new Set();
 const frames = new Map();
 const timers = new Map();
+// A runner that never reports (its page failed to load) must not hold a slot until the run times out.
+const bootTimers = new Map();
+const RUNNER_BOOT_MS = 45_000;
+
+let deadBoots = 0;
+
+function markAlive(jobId) {
+  const t = bootTimers.get(jobId);
+  if (!t) return;
+  clearTimeout(t);
+  bootTimers.delete(jobId);
+  deadBoots = 0;
+}
 
 window.naoAutoApply = {
-  config() {
+  config(jobId) {
+    if (jobId) markAlive(jobId);
     return {
       dryRun: store.settings.dryRun,
       submitPlatforms: store.settings.submitPlatforms,
@@ -164,6 +179,7 @@ window.naoAutoApply = {
     };
   },
   update(jobId, patch) {
+    markAlive(jobId);
     set((s) => (s.runs[jobId] ? { runs: { ...s.runs, [jobId]: { ...s.runs[jobId], ...patch } } } : {}));
   },
   finish(jobId, outcome) {
@@ -285,6 +301,20 @@ function startRun(job) {
   frame.hidden = true;
   frames.set(job.id, frame);
   document.body.appendChild(frame);
+  bootTimers.set(
+    job.id,
+    setTimeout(() => {
+      bootTimers.delete(job.id);
+      deadBoots += 1;
+      if (deadBoots >= 2 && store.phase === "running") {
+        pause("Auto-apply paused: its runner page is not starting. Reload the extension on chrome://extensions, then resume.", "danger");
+      }
+      void finishRun(job.id, {
+        status: "failed",
+        message: "The auto-apply runner did not start. Reload the extension on chrome://extensions and try again.",
+      });
+    }, RUNNER_BOOT_MS),
+  );
   const limitMin = store.settings.runTimeoutMin;
   timers.set(
     job.id,
@@ -319,6 +349,7 @@ async function finishRun(jobId, outcome) {
   if (!run) return;
   clearTimeout(timers.get(jobId));
   timers.delete(jobId);
+  markAlive(jobId);
   const frame = frames.get(jobId);
   if (frame) frame.remove();
   frames.delete(jobId);
@@ -418,7 +449,7 @@ async function start() {
     notify("danger", "Auto-apply needs access to job sites to fill applications.");
     return;
   }
-  set({ phase: "running", notice: null });
+  set({ phase: "running", notice: null, sessionStartedAt: Date.now() });
   log("info", store.settings.dryRun ? "Started in dry run: forms are filled, never submitted." : "Started live: applications are submitted.");
   try {
     await ensureWindow();
@@ -464,27 +495,51 @@ async function openEntry(jobId) {
   }
 }
 
-async function markEntryApplied(jobId) {
-  const h = store.history[jobId];
+async function markEntriesApplied(jobIds) {
+  if (!jobIds.length) return;
   try {
-    await api.markApplied([jobId]);
-    api.updateSession(jobId, "completed").catch(() => {});
-    await saveHistory({ ...store.history, [jobId]: { ...h, status: "applied", message: "Marked applied by you.", at: Date.now(), tabOpen: false } });
-    if (h && h.tabId != null) await chrome.tabs.remove(h.tabId).catch(() => {});
-    log("ok", `Marked applied: ${h ? h.title : "job"}.`);
-    resumeIfUnblocked();
+    await api.markApplied(jobIds);
   } catch (err) {
-    notify("danger", (err && err.message) || "Could not mark it applied.");
+    notify("danger", (err && err.message) || "Could not mark them applied.");
+    return;
   }
-}
-
-async function forgetEntry(jobId) {
   const history = { ...store.history };
-  delete history[jobId];
+  const tabs = [];
+  for (const id of jobIds) {
+    const h = history[id] || {};
+    api.updateSession(id, "completed").catch(() => {});
+    if (h.tabId != null && h.tabOpen) tabs.push(h.tabId);
+    history[id] = { ...h, status: "applied", message: "Marked applied by you.", at: Date.now(), tabOpen: false };
+  }
   await saveHistory(history);
-  await loadQueue();
+  for (const tabId of tabs) await chrome.tabs.remove(tabId).catch(() => {});
+  log("ok", jobIds.length === 1 ? `Marked applied: ${history[jobIds[0]].title || "job"}.` : `Marked ${jobIds.length} jobs applied.`);
   resumeIfUnblocked();
 }
+
+/** Back into the queue at its normal place; open tabs are closed so the retry starts clean. */
+async function retryEntries(jobIds) {
+  if (!jobIds.length) return;
+  const history = { ...store.history };
+  const tabs = [];
+  for (const id of jobIds) {
+    const h = history[id];
+    if (h && h.tabOpen && h.tabId != null && isWaiting(h)) tabs.push(h.tabId);
+    delete history[id];
+  }
+  await saveHistory(history);
+  for (const tabId of tabs) {
+    await chrome.storage.session.remove("aaHandoff:" + tabId).catch(() => {});
+    await chrome.tabs.remove(tabId).catch(() => {});
+  }
+  if (jobIds.length > 1) log("info", `${jobIds.length} jobs moved back to the queue.`);
+  await loadQueue();
+  if (store.phase === "running") pump();
+  resumeIfUnblocked();
+}
+
+const markEntryApplied = (jobId) => markEntriesApplied([jobId]);
+const forgetEntry = (jobId) => retryEntries([jobId]);
 
 function entryFor(jobId) {
   const h = store.history[jobId];
@@ -981,6 +1036,7 @@ function LiveRuns({ s, now }) {
     meta=${runs.length ? `${runs.length} running` : null}
     hint="Each application runs in a background tab in the auto-apply window."
   >
+    ${s.phase !== "idle" || s.sessionStartedAt ? html`<${SessionStrip} s=${s} now=${now} />` : null}
     ${runs.length
       ? html`<div class="aa-runs">
           ${runs.map(([id, r]) => {
@@ -1076,15 +1132,67 @@ function Waiting({ s, now }) {
   const waiting = Object.entries(s.history)
     .filter(([, h]) => isWaiting(h))
     .sort((a, b) => b[1].at - a[1].at);
-  const allLater = () =>
-    set({
-      modal: {
-        title: `Move ${waiting.length} jobs to apply later?`,
+  const [picked, setPicked] = useState(() => new Set());
+  const ids = waiting.map(([id]) => id);
+  const selected = ids.filter((id) => picked.has(id));
+  // With nothing ticked the bar acts on every waiting job.
+  const targets = selected.length ? selected : ids;
+  const allPicked = ids.length > 0 && selected.length === ids.length;
+  const toggle = (id) =>
+    setPicked((p) => {
+      const next = new Set(p);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const done = () => setPicked(new Set());
+  const scope = (n) => (selected.length ? `${n} selected job${n === 1 ? "" : "s"}` : `all ${n} job${n === 1 ? "" : "s"}`);
+  const bulk = (kind) => {
+    const n = targets.length;
+    const ACTIONS = {
+      retry: {
+        title: `Retry ${scope(n)} now?`,
+        message: "Their tabs close and they go back into the queue at their normal place, to be filled again.",
+        confirmLabel: "Retry now",
+        run: () => retryEntries(targets),
+      },
+      later: {
+        title: `Move ${scope(n)} to apply later?`,
         message: "Their tabs close and they go to the end of the queue, after every other job.",
         confirmLabel: "Apply later",
-        onConfirm: () => void applyLater(waiting.map(([id]) => id)),
+        run: () => applyLater(targets),
+      },
+      applied: {
+        title: `Mark ${scope(n)} applied?`,
+        message: "Use this for applications you submitted yourself in their tabs. Their tabs close.",
+        confirmLabel: "Mark applied",
+        run: () => markEntriesApplied(targets),
+      },
+      invalid: {
+        title: `Mark ${scope(n)} invalid?`,
+        message: "They are hidden from your job lists and auto-apply never tries them again. You can restore them from Invalid jobs on the web app.",
+        confirmLabel: "Mark invalid",
+        tone: "danger",
+        run: async () => {
+          for (const id of targets) await markInvalid(id);
+        },
+      },
+    };
+    const a = ACTIONS[kind];
+    set({
+      modal: {
+        title: a.title,
+        message: a.message,
+        confirmLabel: a.confirmLabel,
+        tone: a.tone,
+        onConfirm: () => {
+          set({ modal: null });
+          done();
+          void a.run();
+        },
       },
     });
+  };
   const invalid = (id, h) =>
     set({
       modal: {
@@ -1102,17 +1210,37 @@ function Waiting({ s, now }) {
     title="Waiting on you"
     icon="flag"
     meta=${waiting.length}
-    hint="Finish these in their tabs, or set them aside so the run can continue."
-    action=${waiting.length > 1
-      ? html`<${Button} size="sm" variant="ghost" icon="clock" onClick=${allLater}>All to later</${Button}>`
-      : null}
+    hint="Finish these in their tabs, or handle them together below so the run can continue."
   >
+    ${waiting.length
+      ? html`<div class="aa-bulk" role="toolbar" aria-label="Actions for waiting jobs">
+          <label class="aa-bulk-pick">
+            <input
+              type="checkbox"
+              checked=${allPicked}
+              indeterminate=${selected.length > 0 && !allPicked}
+              onChange=${() => setPicked(allPicked ? new Set() : new Set(ids))}
+              aria-label="Select all waiting jobs"
+            />
+            <span>${selected.length ? `${selected.length} of ${ids.length} selected` : `Select (acts on all ${ids.length})`}</span>
+          </label>
+          <div class="aa-bulk-actions">
+            <${Button} size="sm" variant="secondary" icon="refresh" onClick=${() => bulk("retry")}>Retry now</${Button}>
+            <${Button} size="sm" variant="secondary" icon="clock" onClick=${() => bulk("later")}>Apply later</${Button}>
+            <${Button} size="sm" variant="secondary" icon="check" onClick=${() => bulk("applied")}>Mark applied</${Button}>
+            <${Button} size="sm" variant="ghost" icon="x" onClick=${() => bulk("invalid")}>Invalid</${Button}>
+          </div>
+        </div>`
+      : null}
     ${waiting.length
       ? html`<div class="aa-list">
           ${waiting.map(
-            ([id, h]) => html`<article class="aa-item" key=${id}>
+            ([id, h]) => html`<article class=${`aa-item${picked.has(id) ? " is-picked" : ""}`} key=${id}>
               <div class="aa-item-top">
-                <${StatusBadge} status=${h.status} />
+                <label class="aa-item-pick">
+                  <input type="checkbox" checked=${picked.has(id)} onChange=${() => toggle(id)} aria-label=${`Select ${h.title || "job"}`} />
+                  <${StatusBadge} status=${h.status} />
+                </label>
                 <span class="aa-item-time">${timeAgo(h.at, now)}</span>
               </div>
               <strong class="aa-item-title" title=${h.title}>${h.title}</strong>
@@ -1206,9 +1334,79 @@ function History({ s, now }) {
   </${Card}>`;
 }
 
+function RunSummary({ s, open, onToggle }) {
+  const st = s.settings;
+  const order = ORDERS.find((o) => o.value === st.order) || ORDERS[0];
+  const parts = [
+    order.label,
+    st.minScore ? `match ${st.minScore}+` : "any score",
+    `${st.parallel} at once`,
+    `${st.dailyCap} a day`,
+    `pause at ${st.maxWaiting} waiting`,
+    `${st.platforms.length} sites`,
+  ];
+  return html`<div class="aa-runbar">
+    <span class="aa-card-icon"><${Icon} name="settings" size=${15} /></span>
+    <span class="aa-runbar-text"><strong>Run settings</strong>${parts.join(" · ")}</span>
+    <${Button} size="sm" variant="ghost" icon=${open ? "x" : "settings"} onClick=${onToggle}>${open ? "Hide settings" : "Edit settings"}</${Button}>
+  </div>`;
+}
+
+function sessionStats(s, now) {
+  const since = s.sessionStartedAt || now;
+  const rows = Object.values(s.history).filter((h) => h.at >= since);
+  const count = (st) => rows.filter((h) => h.status === st).length;
+  return {
+    elapsed: now - since,
+    applied: count("applied"),
+    filled: count("filled"),
+    waiting: rows.filter(isWaiting).length,
+    skipped: count("skipped") + count("invalid"),
+    failed: count("failed"),
+    done: rows.length,
+  };
+}
+
+function SessionStrip({ s, now }) {
+  const st = sessionStats(s, now);
+  const left = queueOf(s).length;
+  const total = st.done + Object.keys(s.runs).length + left;
+  const pct = total ? Math.round((st.done / total) * 100) : 0;
+  const cells = [
+    { label: "Running for", value: formatDuration(st.elapsed) },
+    { label: s.settings.dryRun ? "Filled" : "Applied", value: s.settings.dryRun ? st.filled : st.applied, tone: "ok" },
+    { label: "Waiting on you", value: st.waiting, tone: st.waiting ? "warn" : "" },
+    { label: "Skipped", value: st.skipped },
+    { label: "Failed", value: st.failed, tone: st.failed ? "danger" : "" },
+    { label: "Left in queue", value: left },
+  ];
+  return html`<div class="aa-session" aria-label="This session">
+    <div class="aa-session-cells">
+      ${cells.map(
+        (c) => html`<div class=${`aa-session-cell${c.tone ? ` is-${c.tone}` : ""}`}>
+          <span>${c.label}</span><strong>${c.value}</strong>
+        </div>`,
+      )}
+    </div>
+    <div class="aa-session-progress">
+      <${Meter} value=${st.done} max=${total || 1} tone="brand" />
+      <span>${st.done} of ${total} handled this session (${pct}%)</span>
+    </div>
+  </div>`;
+}
+
 function Activity({ s }) {
-  return html`<${Card} title="Activity" icon="clock" hint="What auto-apply did in this window.">
-    ${s.log.length
+  const [open, setOpen] = useState(false);
+  return html`<${Card}
+    title="Activity"
+    icon="clock"
+    meta=${s.log.length || null}
+    hint="Event log for this window."
+    action=${html`<${Button} size="sm" variant="ghost" onClick=${() => setOpen(!open)}>${open ? "Hide" : "Show"}</${Button}>`}
+  >
+    ${!open
+      ? null
+      : s.log.length
       ? html`<ol class="aa-log">
           ${s.log.map(
             (e) => html`<li key=${e.id} class=${`aa-log-${e.tone}`}>
@@ -1234,7 +1432,11 @@ function Notices({ s }) {
 
 function App() {
   const s = useStore();
-  const now = useNow(Object.keys(s.runs).length > 0);
+  const active = s.phase !== "idle";
+  const now = useNow(active || Object.keys(s.runs).length > 0);
+  const [showSettings, setShowSettings] = useState(!active);
+  // Starting collapses the settings so the live run has the room; stopping brings them back.
+  useEffect(() => setShowSettings(!active), [active]);
 
   if (!s.user) {
     return html`<main class="aa-signed-out">
@@ -1251,11 +1453,14 @@ function App() {
       ${s.settings.showGuide ? html`<${Guide} />` : null}
       <${Notices} s=${s} />
       <${Stats} s=${s} />
-      <div class="aa-layout">
-        <aside class="aa-side">
-          <${RunSettings} s=${s} />
-          <${Sites} s=${s} />
-        </aside>
+      ${active ? html`<${RunSummary} s=${s} open=${showSettings} onToggle=${() => setShowSettings(!showSettings)} />` : null}
+      <div class=${`aa-layout${showSettings ? "" : " is-running"}`}>
+        ${showSettings
+          ? html`<aside class="aa-side">
+              <${RunSettings} s=${s} />
+              <${Sites} s=${s} />
+            </aside>`
+          : null}
         <div class="aa-center">
           <${LiveRuns} s=${s} now=${now} />
           <${Queue} s=${s} />
@@ -1263,9 +1468,9 @@ function App() {
         </div>
         <aside class="aa-rail">
           <${Waiting} s=${s} now=${now} />
-          <${Activity} s=${s} />
         </aside>
       </div>
+      <${Activity} s=${s} />
     </main>
     <${Modal} modal=${s.modal} onClose=${() => set({ modal: null })} />
   </div>`;
