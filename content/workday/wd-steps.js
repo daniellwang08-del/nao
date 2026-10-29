@@ -6260,7 +6260,7 @@
             portalOptions: it.portalOptions,
             portalHtml: it.portalHtml,
           })),
-        });
+        }, () => void chrome.runtime.lastError);
         setTimeout(() => {
           delete WDw._waiters[requestId];
           finish({});

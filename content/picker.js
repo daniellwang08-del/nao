@@ -242,9 +242,15 @@
     return "Application form";
   }
 
+  function postToExtension(msg) {
+    try {
+      chrome.runtime.sendMessage(msg, () => void chrome.runtime.lastError);
+    } catch {}
+  }
+
   function announceFieldAdded(payload) {
     try {
-      chrome.runtime.sendMessage({ ...frameMeta(), ...payload });
+      postToExtension({ ...frameMeta(), ...payload });
     } catch {}
   }
 
@@ -2060,7 +2066,7 @@
     hideOverlay();
     if (notify) {
       try {
-        chrome.runtime.sendMessage({ type: "AF_PICKING_STOPPED" });
+        postToExtension({ type: "AF_PICKING_STOPPED" });
       } catch {}
     }
   }
@@ -2104,7 +2110,7 @@
   // ── engine bridge ────────────────────────────────────────────────────────
   async function handleExtract(requestedHandles) {
     if (!AF.engine) {
-      chrome.runtime.sendMessage({ type: "AF_FIELDS", fields: [] });
+      postToExtension({ type: "AF_FIELDS", fields: [] });
       return;
     }
     AF.engine.reset();
@@ -2135,7 +2141,7 @@
         if (!jobdiva && AF.closeReactSelectMenus) AF.closeReactSelectMenus(document);
       } catch {}
     }
-    chrome.runtime.sendMessage({ type: "AF_FIELDS", fields });
+    postToExtension({ type: "AF_FIELDS", fields });
   }
 
   // Fast progressive-reveal probe: count unfilled controls without opening
@@ -2215,7 +2221,7 @@
     } catch {}
     // Only the frame that actually wrote controls reports completion, tagged
     // with passId so the side panel waits for the RIGHT pass before re-scanning.
-    if (report.length) chrome.runtime.sendMessage({ type: "AF_WRITE_RESULT", passId, report });
+    if (report.length) postToExtension({ type: "AF_WRITE_RESULT", passId, report });
   }
 
   // ── serialize extract/write ───────────────────────────────────────────────
@@ -2757,7 +2763,7 @@
         runExclusive(async () => {
           const count = await commitPrefilledInputs();
           try {
-            chrome.runtime.sendMessage({ type: "AF_COMMIT_PREFILLED_DONE", count });
+            postToExtension({ type: "AF_COMMIT_PREFILLED_DONE", count });
           } catch {}
         });
         break;
@@ -2776,7 +2782,7 @@
                 location.hostname
               );
               try {
-                chrome.runtime.sendMessage({ type: "AF_AUTOSELECT_DONE", count: 0 });
+                postToExtension({ type: "AF_AUTOSELECT_DONE", count: 0 });
               } catch {}
               return;
             }
@@ -2797,7 +2803,7 @@
             );
           } catch {}
           try {
-            chrome.runtime.sendMessage({ type: "AF_AUTOSELECT_DONE", count });
+            postToExtension({ type: "AF_AUTOSELECT_DONE", count });
           } catch {}
         });
         break;

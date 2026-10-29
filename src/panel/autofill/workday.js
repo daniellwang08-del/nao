@@ -39,7 +39,9 @@ async function handleWorkdayResolve(msg) {
   const reply = (values) => {
     if (tabId == null) return;
     try {
-      chrome.tabs.sendMessage(tabId, { type: "WD_RESOLVE_RESULT", requestId: msg.requestId, values: values || {} });
+      chrome.tabs
+        .sendMessage(tabId, { type: "WD_RESOLVE_RESULT", requestId: msg.requestId, values: values || {} })
+        .catch(() => {});
     } catch {
       /* tab may be gone */
     }

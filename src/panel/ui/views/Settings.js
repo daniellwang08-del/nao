@@ -212,6 +212,12 @@ export function SettingsView({ s }) {
           onChange=${(on) => savePreference("autoAdvance", on)}
         />
         <${Toggle}
+          label="Open the next job after you submit"
+          hint="Off marks the job applied and keeps it open."
+          checked=${s.nextJobOnSubmit}
+          onChange=${(on) => savePreference("nextJobOnSubmit", on)}
+        />
+        <${Toggle}
           label="Submit Workday and JobDiva applications"
           hint="Off means you always press Submit yourself. Auto-apply follows its own dry run setting."
           checked=${s.autoSubmit}

@@ -92,12 +92,10 @@
       e.preventDefault();
       e.stopPropagation();
       try {
-        chrome.runtime.sendMessage({
-          type: "ASK_SELECTION",
-          text,
-          empty: !text,
-          frameUrl: location.href,
-        });
+        chrome.runtime.sendMessage(
+          { type: "ASK_SELECTION", text, empty: !text, frameUrl: location.href },
+          () => void chrome.runtime.lastError,
+        );
       } catch {
         /* extension context invalidated */
       }

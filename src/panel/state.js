@@ -73,6 +73,7 @@ function initialState() {
     // preferences (storage.loadPrefs)
     minScore: 0,
     autoAdvance: true,
+    nextJobOnSubmit: true,
     autoSubmit: false,
     answerStrategy: "",
     pageSize: 25,

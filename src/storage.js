@@ -182,6 +182,7 @@ const clampInt = (value, min, max, fallback) => {
 const PREFS = {
   minScore: (v) => clampInt(v, 0, 100, DEFAULT_MIN_SCORE),
   autoAdvance: (v) => v !== false,
+  nextJobOnSubmit: (v) => v !== false,
   autoSubmit: (v) => v === true,
   answerStrategy: (v) => (typeof v === "string" ? v.trim().slice(0, 2000) : ""),
   pageSize: (v) => (PAGE_SIZES.includes(Number(v)) ? Number(v) : PAGE_SIZES[0]),

@@ -456,6 +456,10 @@ export async function handleApplicationSubmitted(msg) {
   if (state.job.applied) return;
   const jobId = onScreen;
   if (lastAutoJobId === jobId && now - lastAutoAt < SUBMIT_REPEAT_MS) return;
+  if (!state.nextJobOnSubmit) {
+    if (await recordAppliedOffScreen(jobId)) patchJob(jobId, { applied: true, appliedAt: new Date().toISOString() });
+    return;
+  }
   lastAutoJobId = jobId;
   lastAutoAt = now;
   autoCompleting = true;
@@ -468,16 +472,18 @@ export async function handleApplicationSubmitted(msg) {
 }
 
 async function recordAppliedOffScreen(jobId) {
-  if (lastAutoJobId === jobId && Date.now() - lastAutoAt < SUBMIT_REPEAT_MS) return;
+  if (lastAutoJobId === jobId && Date.now() - lastAutoAt < SUBMIT_REPEAT_MS) return false;
   lastAutoJobId = jobId;
   lastAutoAt = Date.now();
   try {
     const marked = await api.markApplied([jobId]);
-    if (!marked || !(Number(marked.marked) > 0)) return;
+    if (!marked || !(Number(marked.marked) > 0)) return false;
     api.updateSession(jobId, "completed").catch(() => {});
     toast("Application submitted. Marked as applied.", "ok");
+    return true;
   } catch (err) {
     toast(messageOf(err, "Could not mark the submitted job as applied."), "danger");
+    return false;
   }
 }
 

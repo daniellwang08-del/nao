@@ -394,7 +394,10 @@
 
   function mirrorAaLine(line) {
     try {
-      chrome.runtime.sendMessage({ type: "WD_AA_LOG", line: String(line || "").slice(0, 1200), t: Date.now() });
+      chrome.runtime.sendMessage(
+        { type: "WD_AA_LOG", line: String(line || "").slice(0, 1200), t: Date.now() },
+        () => void chrome.runtime.lastError,
+      );
     } catch {}
   }
 

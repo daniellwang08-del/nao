@@ -73,6 +73,26 @@
     return false;
   }
 
+  // Sign in / create account / verification steps come before the application
+  // (Workday's signInSubmitButton, createAccountSubmitButton). Submitting them
+  // is not applying.
+  const ACCOUNT_ATTR_RE = /sign-?in|log-?in|sign-?up|create-?account|register|password|verif|forgot|otp\b|one-?time/;
+  const ACCOUNT_TEXT_RE =
+    /\b(sign[\s-]?in|sign[\s-]?up|log[\s-]?in|create (an |my |your )?account|register|verify|verification|send (the |a )?code|resend|reset password|forgot)\b/;
+  const ACCOUNT_SCOPE =
+    '[data-automation-id="signInContent"], [data-automation-id="signInFormo"], [data-automation-id="createAccountContent"]';
+
+  function isAccountControl(el) {
+    if (ACCOUNT_ATTR_RE.test(attrsOf(el)) || ACCOUNT_TEXT_RE.test(textOf(el))) return true;
+    try {
+      if (el.closest && el.closest(ACCOUNT_SCOPE)) return true;
+      const scope = el.form || (el.closest && el.closest('[role="dialog"], dialog'));
+      return !!(scope && scope.querySelector('input[type="password"]'));
+    } catch {
+      return false;
+    }
+  }
+
   function looksLikeFinalSubmit(el) {
     if (!el || el.disabled) return false;
     const tag = (el.tagName || "").toUpperCase();
@@ -81,6 +101,7 @@
     const attrs = attrsOf(el);
 
     if (isNavigationOnly(text)) return false;
+    if (isAccountControl(el)) return false;
     if (/footer-next|btn-next|saveandcontinue|save-and-continue|continuebutton/.test(attrs)) {
       return false;
     }
@@ -295,12 +316,12 @@
       pendingTimer = null;
     }
     try {
-      chrome.runtime.sendMessage({
-        type: "APP_SUBMITTED",
-        reason: reason || "submit",
-        url: location.href,
-        at: now,
-      });
+      // A submit usually navigates away, and a page entering the back/forward
+      // cache closes the channel; reading lastError keeps that out of the error log.
+      chrome.runtime.sendMessage(
+        { type: "APP_SUBMITTED", reason: reason || "submit", url: location.href, at: now },
+        () => void chrome.runtime.lastError,
+      );
     } catch {
       /* extension context invalidated */
     }
@@ -348,10 +369,29 @@
     }, POLL_MS);
   }
 
+  // Chrome compiles pattern attributes with the "v" flag. Reading the validity of
+  // a field whose pattern fails to compile logs an error against this script
+  // (Lever's email pattern does), and the browser ignores that pattern anyway.
+  function patternCompiles(el) {
+    const pattern = el.getAttribute && el.getAttribute("pattern");
+    if (!pattern) return true;
+    try {
+      new RegExp(`^(?:${pattern})$`, "v");
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   function blockedByNativeValidation(ctl) {
     try {
       const form = ctl && ctl.form;
-      return !!form && !form.noValidate && typeof form.checkValidity === "function" && !form.checkValidity();
+      if (!form || form.noValidate) return false;
+      for (const el of form.elements) {
+        if (!el.willValidate || !patternCompiles(el)) continue;
+        if (el.validity && !el.validity.valid) return true;
+      }
+      return false;
     } catch {
       return false;
     }

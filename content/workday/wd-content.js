@@ -142,7 +142,7 @@
 
   function send(msg) {
     try {
-      chrome.runtime.sendMessage(msg);
+      chrome.runtime.sendMessage(msg, () => void chrome.runtime.lastError);
     } catch {}
   }
 
