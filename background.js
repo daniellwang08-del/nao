@@ -327,6 +327,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 const APP_HELPER_FILES = ["content/ask-hotkey.js", "content/submit-watch.js"];
+// Corner "Fill again" button, top frame of tabs auto-apply left for the user.
+const REFILL_FAB_FILE = "content/refill-fab.js";
 
 async function injectAppHelpers(tabId) {
   if (tabId == null) return;
@@ -349,9 +351,11 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status !== "complete") return;
   if (!tab || !tab.url || !/^https?:/i.test(tab.url)) return;
   void (async () => {
-    if (!(await isAppAssistArmed()) && !(await handOffEntry(tabId))) return;
+    const handOff = await handOffEntry(tabId);
+    if (!(await isAppAssistArmed()) && !handOff) return;
     try {
       await injectAppHelpers(tabId);
+      if (handOff) await chrome.scripting.executeScript({ target: { tabId }, files: [REFILL_FAB_FILE] });
     } catch (err) {
       // Missing host permission is expected until the side panel requests it.
       console.warn("app helpers inject failed", tabId, err);
@@ -518,23 +522,80 @@ async function routeHandOffSubmit(sender) {
     const next = { ...history[jobId], status: "applied", message: "You submitted it.", at: Date.now(), tabOpen: false };
     await chrome.storage.local.set({ [AA_HISTORY_KEY]: { ...history, [jobId]: next } });
   }
+  chrome.tabs.sendMessage(tabId, { type: "AA_FAB_HIDE" }).catch(() => {});
   chrome.runtime.sendMessage({ type: "SESSION_CHANGED", jobId }).catch(() => {});
   return true;
 }
 
 const AUTO_APPLY_PAGE = "autoapply.html";
 
-async function openAutoApplyConsole() {
+async function openAutoApplyConsole({ focus = true } = {}) {
   const url = chrome.runtime.getURL(AUTO_APPLY_PAGE);
   const [existing] = await chrome.tabs.query({ url: url + "*" });
   if (existing && existing.id != null) {
-    await chrome.tabs.update(existing.id, { active: true });
-    if (existing.windowId != null) await chrome.windows.update(existing.windowId, { focused: true }).catch(() => {});
+    if (focus) {
+      await chrome.tabs.update(existing.id, { active: true });
+      if (existing.windowId != null) await chrome.windows.update(existing.windowId, { focused: true }).catch(() => {});
+    }
     return existing.id;
   }
-  const tab = await chrome.tabs.create({ url, active: true });
+  const tab = await chrome.tabs.create({ url, active: focus });
   return tab.id;
 }
+
+async function isAutoApplyConsoleOpen() {
+  if (!chrome.runtime.getContexts) return false;
+  try {
+    const contexts = await chrome.runtime.getContexts({ contextTypes: ["TAB"] });
+    return contexts.some((c) => String(c.documentUrl || "").includes("/" + AUTO_APPLY_PAGE));
+  } catch {
+    return false;
+  }
+}
+
+const AA_FAB_PREFIX = "aaFab:";
+
+/** What the corner button on a hand-off tab shows: a live refill, or why the tab was left. */
+async function fabState(tabId) {
+  const entry = await handOffEntry(tabId);
+  if (!entry || !entry.jobId) return { show: false };
+  const key = AA_FAB_PREFIX + tabId;
+  const { [key]: live } = await chrome.storage.session.get(key).catch(() => ({}));
+  if (live && live.state === "running" && Date.now() - Number(live.at || 0) < 15 * 60_000 && (await isAutoApplyConsoleOpen())) {
+    return { show: true, state: "running", message: live.message || "" };
+  }
+  const { [AA_HISTORY_KEY]: history } = await chrome.storage.local.get(AA_HISTORY_KEY);
+  const h = history && history[String(entry.jobId)];
+  return { show: true, state: "idle", status: (h && h.status) || "", message: (h && h.message) || "" };
+}
+
+/** "Fill again" pressed on a hand-off tab: the console runs it, opened in the background if needed. */
+async function requestRefill(tabId) {
+  const entry = await handOffEntry(tabId);
+  if (!entry || !entry.jobId) return { ok: false, error: "Auto-apply no longer tracks this tab." };
+  const jobId = String(entry.jobId);
+  if (await isAutoApplyConsoleOpen()) {
+    const res = await chrome.runtime.sendMessage({ type: "AA_REFILL_REQUEST", jobId, tabId }).catch(() => null);
+    if (res) return res;
+  }
+  await chrome.storage.session.set({ aaRefillPending: { jobId, tabId, at: Date.now() } });
+  await openAutoApplyConsole({ focus: false });
+  return { ok: true, opening: true };
+}
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || (msg.type !== "AA_FAB_STATE" && msg.type !== "AA_REFILL")) return false;
+  const tabId = sender && sender.tab ? sender.tab.id : null;
+  if (tabId == null || sender.id !== chrome.runtime.id) {
+    sendResponse({ ok: false, show: false });
+    return false;
+  }
+  const work = msg.type === "AA_FAB_STATE" ? fabState(tabId) : requestRefill(tabId);
+  work
+    .then(sendResponse)
+    .catch((err) => sendResponse({ ok: false, show: false, error: String((err && err.message) || err) }));
+  return true;
+});
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!(msg && msg.type === "OPEN_AUTO_APPLY")) return false;
@@ -577,7 +638,7 @@ async function handleAppSubmitted(msg, sender) {
 // unregisters it first), so the job moves to apply later.
 async function laterOnHandOffClose(tabId) {
   const entry = await handOffEntry(tabId);
-  await chrome.storage.session.remove([AA_TAB_PREFIX + tabId, AA_HANDOFF_PREFIX + tabId]).catch(() => {});
+  await chrome.storage.session.remove([AA_TAB_PREFIX + tabId, AA_HANDOFF_PREFIX + tabId, AA_FAB_PREFIX + tabId]).catch(() => {});
   if (!entry || !entry.jobId) return;
   const jobId = String(entry.jobId);
   const { [AA_HISTORY_KEY]: history } = await chrome.storage.local.get(AA_HISTORY_KEY);

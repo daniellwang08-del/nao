@@ -28,6 +28,9 @@ const OTP_POLL_MS = 8_000;
 const console_ = window.parent && window.parent.naoAutoApply;
 const params = new URLSearchParams(location.search);
 const jobId = params.get("job");
+// Set when the user pressed "Fill again" on a tab auto-apply left for them:
+// fill that tab where it is, and never submit.
+const refillTabId = params.get("tab") ? Number(params.get("tab")) : null;
 
 let submittedSignal = null;
 let ownTabId = null;
@@ -401,12 +404,66 @@ async function run(cfg) {
   return { status: "applied", message: `Submitted and confirmed (${via}).` };
 }
 
+async function adoptTab(tabId) {
+  let tab;
+  try {
+    tab = await chrome.tabs.get(tabId);
+  } catch {
+    throw new Stop("failed", "The application tab was closed.");
+  }
+  ownTabId = tab.id;
+  keepAwake(tab.id);
+  await chrome.storage.session.set({ [AA_TAB_PREFIX + tab.id]: { jobId, at: Date.now() } });
+  report({ tabId: tab.id });
+  await wakeTab(tab.id);
+  return tab;
+}
+
+/** Fill again in the tab the user is looking at. Their page, their submit. */
+async function refill() {
+  await boot();
+  step("Loading the job…");
+  const session = await api.openSession(jobId, { fresh: false });
+  const job = jobFromSession(session);
+  report({ title: job.title, company: job.company });
+  if (!docsComplete(job.docs)) throw needsYou("Resume or cover letter is not built yet. Build them in NAO, then fill again.");
+
+  const tab = await adoptTab(refillTabId);
+  const platform = detectPlatform({ pageUrl: tab.url });
+  report({ platform });
+  job.engine = resolveEngine({ snapshot: job.snapshot, pageUrl: tab.url });
+  setState({ job, autoApplySubmit: false });
+
+  step("Filling the application…");
+  let result;
+  try {
+    result = await fill(tab);
+  } catch (err) {
+    // A user's own tab is never closed as an invalid posting from here.
+    if (err instanceof Stop && err.status === "invalid") throw needsYou("This posting looks closed or removed. Check the page.");
+    throw err;
+  }
+  report({ filled: result.filled });
+  if (result.submitted) {
+    step("Marking applied…");
+    await api.markApplied([jobId]);
+    await api.updateSession(jobId, "completed").catch(() => {});
+    return { status: "applied", message: "The site submitted the application on its own." };
+  }
+  if (result.needs.length) throw needsYou("Filled again. Needs your input: " + result.needs.slice(0, 4).join("; "));
+  await delay(1500);
+  const check = await pageState(tab.id);
+  if (check.missing.length) throw needsYou("Filled again, but required fields are still empty: " + check.missing.slice(0, 5).join(", "));
+  if (check.captcha) throw needsYou("Filled again. The site wants a CAPTCHA. Solve it and submit.");
+  return { status: "filled", message: "Filled again. Review the form and submit it." };
+}
+
 async function main() {
   if (!console_ || !jobId) return;
   const cfg = console_.config(jobId);
   let outcome;
   try {
-    outcome = await run(cfg);
+    outcome = refillTabId != null ? await refill() : await run(cfg);
   } catch (err) {
     outcome =
       err instanceof Stop

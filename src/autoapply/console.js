@@ -39,12 +39,16 @@ const QUEUE_SHOWN = 60;
 
 const FILL_PLATFORMS = Object.keys(EASE_TIER);
 const ALL_PLATFORMS = [...FILL_PLATFORMS, ...NEEDS_ACCOUNT, "board"].sort((a, b) => easeTier(a) - easeTier(b));
-const RECOMMENDED_FILL = FILL_PLATFORMS.filter((p) => p !== "generic");
+// iCIMS makes an account per employer before every form, so it stays opt-in.
+const RECOMMENDED_FILL = ALL_PLATFORMS.filter((p) => p !== "icims");
+// The site default before every site but iCIMS was on.
+const OLD_DEFAULT_FILL = FILL_PLATFORMS.filter((p) => p !== "generic");
+const SETTINGS_VERSION = 2;
 
 const DEFAULT_SETTINGS = {
+  version: SETTINGS_VERSION,
   parallel: 3,
   dryRun: true,
-  dailyCap: 25,
   maxWaiting: 10,
   closeOnSuccess: true,
   platforms: RECOMMENDED_FILL,
@@ -136,6 +140,18 @@ function waitingOnYou(history, runs) {
   return open + Object.values(runs).filter((r) => r.status === "needs_you").length;
 }
 
+/** Saved settings over the defaults. Sites still on the old default move to the new one. */
+function loadedSettings(saved) {
+  const { dailyCap: _retired, ...kept } = saved || {};
+  const settings = { ...DEFAULT_SETTINGS, ...kept, version: SETTINGS_VERSION };
+  const untouched =
+    Array.isArray(kept.platforms) &&
+    kept.platforms.length === OLD_DEFAULT_FILL.length &&
+    OLD_DEFAULT_FILL.every((p) => kept.platforms.includes(p));
+  if ((kept.version || 1) < SETTINGS_VERSION && untouched) settings.platforms = RECOMMENDED_FILL;
+  return settings;
+}
+
 async function saveSettings(patch) {
   const settings = { ...store.settings, ...patch };
   set({ settings });
@@ -181,6 +197,8 @@ window.naoAutoApply = {
   update(jobId, patch) {
     markAlive(jobId);
     set((s) => (s.runs[jobId] ? { runs: { ...s.runs, [jobId]: { ...s.runs[jobId], ...patch } } } : {}));
+    const run = store.runs[jobId];
+    if (run && run.refillTabId != null && patch.message) tellPage(run.refillTabId, "running", patch.message);
   },
   finish(jobId, outcome) {
     void finishRun(jobId, outcome);
@@ -257,10 +275,6 @@ function pump() {
   while (Object.keys(store.runs).length < settings.parallel) {
     const queue = queueOf(store);
     if (!queue.length) break;
-    if (!settings.dryRun && appliedToday(store.history) + submittingCount() >= settings.dailyCap) {
-      pause(`Daily limit of ${settings.dailyCap} applications reached. Raise it or come back tomorrow.`, "warn");
-      return;
-    }
     if (waitingOnYou(store.history, store.runs) >= settings.maxWaiting) {
       pause(
         `${settings.maxWaiting} applications are waiting on you. Finish them or set them aside for later, and auto-apply continues.`,
@@ -285,19 +299,27 @@ function pump() {
   }
 }
 
-function submittingCount() {
-  return Object.values(store.runs).filter((r) => r.submittedAt).length;
-}
-
-function startRun(job) {
+function startRun(job, { refillTabId = null } = {}) {
   set((s) => ({
     available: s.available.filter((q) => q.id !== job.id),
     pinned: s.pinned.filter((id) => id !== job.id),
-    runs: { ...s.runs, [job.id]: { ...job, status: "running", message: "Starting...", startedAt: Date.now() } },
+    runs: {
+      ...s.runs,
+      [job.id]: {
+        ...job,
+        status: "running",
+        message: "Starting...",
+        startedAt: Date.now(),
+        ...(refillTabId != null ? { refillTabId, tabId: refillTabId } : {}),
+      },
+    },
   }));
-  log("info", `Started ${job.title}${job.company ? ` at ${job.company}` : ""} (${label(job.platform)}).`);
+  const where = `${job.title}${job.company ? ` at ${job.company}` : ""}`;
+  log("info", refillTabId != null ? `Filling ${where} again in its tab.` : `Started ${where} (${label(job.platform)}).`);
   const frame = document.createElement("iframe");
-  frame.src = `autoapply-runner.html?job=${encodeURIComponent(job.id)}`;
+  frame.src =
+    `autoapply-runner.html?job=${encodeURIComponent(job.id)}` +
+    (refillTabId != null ? `&tab=${encodeURIComponent(String(refillTabId))}` : "");
   frame.hidden = true;
   frames.set(job.id, frame);
   document.body.appendChild(frame);
@@ -340,6 +362,55 @@ async function rememberHandOff(tabId, jobId) {
   await chrome.scripting
     .executeScript({ target: { tabId, allFrames: true }, files: ["content/submit-watch.js"] })
     .catch(() => {});
+  await chrome.scripting.executeScript({ target: { tabId }, files: ["content/refill-fab.js"] }).catch(() => {});
+}
+
+// ── "Fill again" from the page's corner button ──────────────────────────────
+
+const FAB_KEY = "aaFab:";
+
+/** Live state for the corner button on a tab; the background serves it after a reload. */
+function tellPage(tabId, state, message) {
+  if (state === "running") void chrome.storage.session.set({ [FAB_KEY + tabId]: { state, message, at: Date.now() } }).catch(() => {});
+  else void chrome.storage.session.remove(FAB_KEY + tabId).catch(() => {});
+  chrome.tabs.sendMessage(tabId, { type: "AA_FAB_STATUS", state, message }).catch(() => {});
+}
+
+const FAB_RESULT = { filled: "done", applied: "done", needs_you: "needs" };
+
+async function refillTab(jobId, tabId) {
+  if (!store.user) return { ok: false, error: "Sign in to the NAO extension first." };
+  if (store.runs[jobId]) return { ok: false, error: "NAO is already filling this application." };
+  if (!(await chrome.tabs.get(tabId).catch(() => null))) return { ok: false, error: "The application tab is gone." };
+  const h = entryFor(jobId) || {};
+  const job = { id: jobId, title: h.title || "Application", company: h.company || "", platform: h.platform || "", score: h.score, url: h.url || "" };
+  // The run reports into history again when it ends; until then it shows as a live run.
+  if (store.history[jobId]) {
+    const history = { ...store.history };
+    delete history[jobId];
+    await saveHistory(history);
+  }
+  startRun(job, { refillTabId: tabId });
+  tellPage(tabId, "running", "Starting...");
+  return { ok: true };
+}
+
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (!(msg && msg.type === "AA_REFILL_REQUEST" && msg.jobId && msg.tabId != null)) return false;
+  refillTab(String(msg.jobId), Number(msg.tabId))
+    .then(sendResponse)
+    .catch((err) => sendResponse({ ok: false, error: (err && err.message) || "Could not start filling." }));
+  return true;
+});
+
+/** A "Fill again" press that opened this console. */
+async function takePendingRefill() {
+  const { aaRefillPending: p } = await chrome.storage.session.get("aaRefillPending").catch(() => ({}));
+  if (!p) return;
+  await chrome.storage.session.remove("aaRefillPending").catch(() => {});
+  if (Date.now() - Number(p.at || 0) > 60_000) return;
+  const res = await refillTab(String(p.jobId), Number(p.tabId));
+  if (!res.ok) tellPage(Number(p.tabId), "error", res.error);
 }
 
 const OUTCOME_TONE = { applied: "ok", filled: "info", needs_you: "warn", skipped: "muted", failed: "danger", later: "info", invalid: "muted" };
@@ -403,6 +474,7 @@ async function finishRun(jobId, outcome) {
   const runs = { ...store.runs };
   delete runs[jobId];
   set({ runs });
+  if (run.refillTabId != null && tabOpen) tellPage(run.refillTabId, FAB_RESULT[status] || "error", entry.message);
   log(OUTCOME_TONE[status] || "muted", `${STATUS[status] ? STATUS[status].label : status}: ${run.title}. ${entry.message}`.trim());
   await saveHistory({ ...store.history, [jobId]: entry });
   if (store.phase === "paused" && !Object.keys(store.runs).length) notify("info", "Paused. Running applications have finished.");
@@ -615,7 +687,7 @@ function setLive(live) {
   set({
     modal: {
       title: "Submit applications for real?",
-      message: `Auto-apply will press Submit on the sites you allow, up to ${store.settings.dailyCap} a day. Dry run only fills forms so you can review them first.`,
+      message: "Auto-apply will press Submit on the sites you allow, for every job in the queue. Dry run only fills forms so you can review them first.",
       confirmLabel: "Turn on live mode",
       onConfirm: () => {
         set({ modal: null });
@@ -830,7 +902,6 @@ function Stats({ s }) {
   const offSites = s.available.length - onSites;
   const accountReady = s.account ? s.account.ready : null;
   const accountToday = s.account ? Math.max(s.account.appliedToday, today) : today;
-  const capLeft = Math.max(0, s.settings.dailyCap - today);
   return html`<div class="aa-stats">
     <${Stat}
       icon="layers"
@@ -858,8 +929,7 @@ function Stats({ s }) {
       tone="ok"
       label="Applied today"
       value=${accountToday}
-      meter=${html`<${Meter} value=${today} max=${s.settings.dailyCap} tone="ok" />`}
-      sub=${s.settings.dryRun ? `${today} by auto-apply, dry run is on` : `${today} by auto-apply, ${capLeft} left today`}
+      sub=${s.settings.dryRun ? `${today} by auto-apply, dry run is on` : `${today} by auto-apply`}
     />
     <${Stat}
       icon="flag"
@@ -917,14 +987,6 @@ function RunSettings({ s }) {
         min=${1}
         max=${5}
         onChange=${(v) => void saveSettings({ parallel: v })}
-      />
-      <${RangeField}
-        label="Daily limit"
-        hint="Submitted applications per day. Live mode stops here."
-        value=${st.dailyCap}
-        min=${1}
-        max=${200}
-        onChange=${(v) => void saveSettings({ dailyCap: v })}
       />
       <${RangeField}
         label="Pause when waiting on you"
@@ -1341,7 +1403,6 @@ function RunSummary({ s, open, onToggle }) {
     order.label,
     st.minScore ? `match ${st.minScore}+` : "any score",
     `${st.parallel} at once`,
-    `${st.dailyCap} a day`,
     `pause at ${st.maxWaiting} waiting`,
     `${st.platforms.length} sites`,
   ];
@@ -1486,12 +1547,20 @@ async function init() {
   set({
     user: user && token ? user : null,
     backendUrl,
-    settings: { ...DEFAULT_SETTINGS, ...(saved[SETTINGS_KEY] || {}) },
+    settings: loadedSettings(saved[SETTINGS_KEY]),
     history: saved[HISTORY_KEY] || {},
   });
-  if (!user || !token) return;
+  if (!user || !token) {
+    const { aaRefillPending: p } = await chrome.storage.session.get("aaRefillPending").catch(() => ({}));
+    if (p) {
+      await chrome.storage.session.remove("aaRefillPending").catch(() => {});
+      tellPage(Number(p.tabId), "error", "Sign in to the NAO extension first.");
+    }
+    return;
+  }
   api.apiFetch("/mail/config").then((mail) => set({ mail }), () => set({ mail: null }));
   void loadQueue();
+  void takePendingRefill();
 }
 
 render(html`<${App} />`, document.getElementById("app"));
