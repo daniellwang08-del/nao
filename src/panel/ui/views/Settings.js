@@ -223,6 +223,12 @@ export function SettingsView({ s }) {
           checked=${s.autoSubmit}
           onChange=${toggleAutoSubmit}
         />
+        <${Toggle}
+          label="Buttons on application pages"
+          hint="Fill again, Skip and Invalid job in the corner of pages auto-apply leaves for you."
+          checked=${s.aaPageButtons}
+          onChange=${(on) => savePreference("aaPageButtons", on)}
+        />
         <label class="field">
           <span class="field-label">Guidance for written answers</span>
           <textarea class="input" rows="3" placeholder="For example: keep answers short and mention my React work." value=${strategy}

@@ -3,8 +3,13 @@
 import { handleApplicationSubmitted, handleAskSelection, onWebappOpenJob } from "./actions/job.js";
 import { reloadSession } from "./actions/session.js";
 import { handleAutofillMessage } from "./autofill/index.js";
+import { setState } from "./state.js";
 
 export function installMessageRouter() {
+  // Hidden from a page's corner buttons: keep the Settings toggle in step.
+  chrome.storage.local.onChanged.addListener((changes) => {
+    if (changes.aaPageButtons) setState({ aaPageButtons: changes.aaPageButtons.newValue !== false });
+  });
   chrome.runtime.onMessage.addListener((msg, sender) => {
     if (!msg || typeof msg.type !== "string") return;
     switch (msg.type) {

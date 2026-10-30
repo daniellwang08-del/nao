@@ -184,6 +184,7 @@ const PREFS = {
   autoAdvance: (v) => v !== false,
   nextJobOnSubmit: (v) => v !== false,
   autoSubmit: (v) => v === true,
+  aaPageButtons: (v) => v !== false,
   answerStrategy: (v) => (typeof v === "string" ? v.trim().slice(0, 2000) : ""),
   pageSize: (v) => (PAGE_SIZES.includes(Number(v)) ? Number(v) : PAGE_SIZES[0]),
   dailyApplyTarget: (v) => (v == null ? DEFAULT_DAILY_APPLY_TARGET : clampInt(v, 0, 200, DEFAULT_DAILY_APPLY_TARGET)),

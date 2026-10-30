@@ -583,14 +583,49 @@ async function requestRefill(tabId) {
   return { ok: true, opening: true };
 }
 
+const PAGE_DECISIONS = {
+  skip: { status: "skipped", message: "Skipped by you from the application page." },
+  invalid: { status: "invalid", message: "Marked invalid from the application page. Hidden from your job lists." },
+};
+
+/** Skip or Invalid job pressed on a hand-off tab: record it, then close the tab. */
+async function decideFromPage(tabId, kind) {
+  const decision = PAGE_DECISIONS[kind];
+  const entry = await handOffEntry(tabId);
+  if (!decision || !entry || !entry.jobId) return { ok: false, error: "Auto-apply no longer tracks this tab." };
+  if ((await fabState(tabId)).state === "running") return { ok: false, error: "Wait for the fill to finish first." };
+  const jobId = String(entry.jobId);
+  if (kind === "invalid") {
+    try {
+      await api.reportJobInvalid(jobId, "Marked invalid from the auto-apply application page.");
+    } catch (err) {
+      return { ok: false, error: (err && err.message) || "Could not mark the job invalid." };
+    }
+  }
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  const { [AA_HISTORY_KEY]: history } = await chrome.storage.local.get(AA_HISTORY_KEY);
+  const prev = (history && history[jobId]) || { title: (tab && tab.title) || "Application", url: (tab && tab.url) || "" };
+  const next = { ...prev, status: decision.status, message: decision.message, at: Date.now(), tabOpen: false };
+  await chrome.storage.local.set({ [AA_HISTORY_KEY]: { ...(history || {}), [jobId]: next } });
+  // Unregistered before closing, or the close would move the job to apply later.
+  await chrome.storage.session.remove([AA_HANDOFF_PREFIX + tabId, AA_FAB_PREFIX + tabId]).catch(() => {});
+  setTimeout(() => void chrome.tabs.remove(tabId).catch(() => {}), 900);
+  return { ok: true };
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg || (msg.type !== "AA_FAB_STATE" && msg.type !== "AA_REFILL")) return false;
+  if (!msg || !["AA_FAB_STATE", "AA_REFILL", "AA_PAGE_SKIP", "AA_PAGE_INVALID"].includes(msg.type)) return false;
   const tabId = sender && sender.tab ? sender.tab.id : null;
   if (tabId == null || sender.id !== chrome.runtime.id) {
     sendResponse({ ok: false, show: false });
     return false;
   }
-  const work = msg.type === "AA_FAB_STATE" ? fabState(tabId) : requestRefill(tabId);
+  const work =
+    msg.type === "AA_FAB_STATE"
+      ? fabState(tabId)
+      : msg.type === "AA_REFILL"
+        ? requestRefill(tabId)
+        : decideFromPage(tabId, msg.type === "AA_PAGE_SKIP" ? "skip" : "invalid");
   work
     .then(sendResponse)
     .catch((err) => sendResponse({ ok: false, show: false, error: String((err && err.message) || err) }));

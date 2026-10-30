@@ -75,6 +75,7 @@ function initialState() {
     autoAdvance: true,
     nextJobOnSubmit: true,
     autoSubmit: false,
+    aaPageButtons: true,
     answerStrategy: "",
     pageSize: 25,
     dailyApplyTarget: 50,
