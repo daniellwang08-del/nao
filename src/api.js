@@ -304,9 +304,14 @@ export const createJobAddBatch = (jobIds, source = "extension") =>
 export const autofill = (jobId, fields, preferences) =>
   apiFetch("/assistant/autofill", {
     method: "POST",
-    body: { job_id: jobId, fields, ...(preferences ? { preferences } : {}) },
+    body: { job_id: jobId, fields, client_date: localDate(), ...(preferences ? { preferences } : {}) },
     timeoutMs: 180_000,
   });
+
+function localDate() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
 
 /** Canonical structured profile for deterministic engines (Workday) and cover letters. */
 export const getAutofillProfile = (jobId) =>

@@ -49,6 +49,85 @@
     return "text";
   }
 
+  // react-datepicker (Ashby "Pick date..."): a plain text input that parses typed
+  // text with its dateFormat on blur and clears anything it cannot parse,
+  // ISO dates included. Probe on Ashby: "11/12/2026" and "November 12, 2026"
+  // commit, "2026-11-12" is wiped.
+  const DEFAULT_DATE_FORMAT = "MM/DD/YYYY";
+  const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+  function isDatePickerInput(inp) {
+    try {
+      return !!(
+        (inp.closest && inp.closest(".react-datepicker__input-container")) ||
+        /\bashby-application-form-input-date\b/.test(String(inp.className || ""))
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  function datePickerFormat(inp) {
+    const ph = clean(inp.getAttribute && inp.getAttribute("placeholder"));
+    return /^(?=.*y{2})(?=.*m{1,2})(?=.*d{1,2})[ymd\s/.-]+$/i.test(ph) ? ph.toUpperCase() : DEFAULT_DATE_FORMAT;
+  }
+
+  function validParts(y, m, d) {
+    if (y < 100) y += 2000;
+    const dt = new Date(y, m - 1, d);
+    return dt.getFullYear() === y && dt.getMonth() === m - 1 && dt.getDate() === d ? { y, m, d } : null;
+  }
+
+  // Answer text -> {y, m, d}. Slash dates are month first (the server asks for
+  // MM/DD/YYYY) unless the first number cannot be a month.
+  function parseDateAnswer(text, format) {
+    const s = clean(text);
+    if (!s) return null;
+    if (/^(today|now)$/i.test(s)) {
+      const t = new Date();
+      return { y: t.getFullYear(), m: t.getMonth() + 1, d: t.getDate() };
+    }
+    let m = s.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
+    if (m) return validParts(+m[1], +m[2], +m[3]);
+    m = s.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})$/);
+    if (m) {
+      const dayFirst = /^D/i.test(format || "") || +m[1] > 12;
+      return dayFirst ? validParts(+m[3], +m[2], +m[1]) : validParts(+m[3], +m[1], +m[2]);
+    }
+    const t = new Date(s.replace(/(\d)(st|nd|rd|th)\b/gi, "$1"));
+    if (!isNaN(t.getTime()) && /[a-z]/i.test(s)) return { y: t.getFullYear(), m: t.getMonth() + 1, d: t.getDate() };
+    return null;
+  }
+
+  function formatDate(p, format) {
+    const pad = (n) => String(n).padStart(2, "0");
+    return (format || DEFAULT_DATE_FORMAT).replace(/Y{4}|Y{2}|M{1,2}|D{1,2}/gi, (tok) => {
+      const t = tok.toUpperCase();
+      if (t === "YYYY") return String(p.y);
+      if (t === "YY") return pad(p.y % 100);
+      if (t === "MM") return pad(p.m);
+      if (t === "M") return String(p.m);
+      if (t === "DD") return pad(p.d);
+      return String(p.d);
+    });
+  }
+
+  async function writeDatePicker(el, answer) {
+    const raw = clean(answer.value || "");
+    if (!raw) return false;
+    const parts = parseDateAnswer(raw, datePickerFormat(el));
+    const tries = parts ? [formatDate(parts, datePickerFormat(el)), `${MONTHS[parts.m - 1]} ${parts.d}, ${parts.y}`] : [raw];
+    for (const value of tries) {
+      setTextInput(el, value);
+      await new Promise((r) => setTimeout(r, 150));
+      try {
+        el.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      } catch {}
+      if (clean(el.value)) return true;
+    }
+    return false;
+  }
+
   // A combobox input belongs to react-select et al., not the native driver.
   function isComboInput(inp) {
     const role = (inp.getAttribute && inp.getAttribute("role")) || "";
@@ -251,8 +330,11 @@
       return el;
     },
     extract(root) {
+      const datePicker = isDatePickerInput(root);
+      const constraints = constraintsOf(root);
+      if (datePicker) constraints.date_format = datePickerFormat(root);
       return {
-        kind: inputKind(root),
+        kind: datePicker ? "date" : inputKind(root),
         label: labelForControl(root),
         required:
           !!root.required ||
@@ -260,17 +342,18 @@
           !!(AF.manatal && AF.manatal.isRequiredControl && AF.manatal.isRequiredControl(root)) ||
           !!(AF.jobdiva && AF.jobdiva.isRequiredControl && AF.jobdiva.isRequiredControl(root)) ||
           !!(AF.icims && AF.icims.isRequiredControl && AF.icims.isRequiredControl(root)),
-        constraints: constraintsOf(root),
+        constraints,
       };
     },
     isFilled(root) {
       return clean(root.value) !== "";
     },
     async write(root, answer) {
+      if (isDatePickerInput(root)) return writeDatePicker(root, answer);
       return setTextInput(root, answer.value || "");
     },
   });
 
   // Exposed for reuse by other drivers (e.g. intl-tel-input writes a text input).
-  AF.native = { setTextInput, selectOption, selectOptionsMulti, inputKind, normText };
+  AF.native = { setTextInput, selectOption, selectOptionsMulti, inputKind, normText, parseDateAnswer, formatDate };
 })();
