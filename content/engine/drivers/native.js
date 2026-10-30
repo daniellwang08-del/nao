@@ -112,19 +112,34 @@
     });
   }
 
+  // Workable's picker masks typed text as MM/DD/YYYY ("November 5, 2026" turns
+  // into "05/02/6"), and the calendar opening on first focus can wipe the first
+  // write. A write counts only when the field reads back as the wanted date.
   async function writeDatePicker(el, answer) {
     const raw = clean(answer.value || "");
     if (!raw) return false;
-    const parts = parseDateAnswer(raw, datePickerFormat(el));
-    const tries = parts ? [formatDate(parts, datePickerFormat(el)), `${MONTHS[parts.m - 1]} ${parts.d}, ${parts.y}`] : [raw];
+    const format = datePickerFormat(el);
+    const parts = parseDateAnswer(raw, format);
+    if (!parts) {
+      setTextInput(el, raw);
+      return !!clean(el.value);
+    }
+    const numeric = formatDate(parts, format);
+    const tries = [numeric, numeric, `${MONTHS[parts.m - 1]} ${parts.d}, ${parts.y}`];
+    const holds = () => {
+      const got = parseDateAnswer(el.value, format);
+      return !!got && got.y === parts.y && got.m === parts.m && got.d === parts.d;
+    };
     for (const value of tries) {
       setTextInput(el, value);
       await new Promise((r) => setTimeout(r, 150));
       try {
         el.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
       } catch {}
-      if (clean(el.value)) return true;
+      await new Promise((r) => setTimeout(r, 50));
+      if (holds()) return true;
     }
+    if (!holds()) setTextInput(el, "");
     return false;
   }
 

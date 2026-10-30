@@ -37,7 +37,10 @@
     return !!(el && el.closest && el.closest('form[data-ui="application-form"]'));
   }
 
-  // Screening-question host: fieldset / role=group carrying data-ui="QA_*".
+  // Question host: fieldset / role=group carrying data-ui="QA_*" (screening
+  // questions) or "CA_*" (the company's own fields, e.g. "Are you authorized to
+  // work in the United States?"). Both hide the native input behind a
+  // role=radio / role=checkbox widget.
   function applicationQuestionHost(el) {
     if (!el || !isApplicationControl(el)) return null;
     try {
@@ -45,7 +48,7 @@
       const host = el.closest('fieldset[data-ui], [role="group"][data-ui], [role="radiogroup"][data-ui]');
       if (!host) return null;
       const ui = host.getAttribute("data-ui") || "";
-      if (!/^QA_/i.test(ui)) return null;
+      if (!/^(QA|CA)_/i.test(ui)) return null;
       return host;
     } catch {
       return null;
@@ -108,7 +111,7 @@
           const t = (el.type || "").toLowerCase();
           if (t === "radio" || t === "checkbox") {
             const host = el.closest && el.closest("fieldset[data-ui], [role='group'][data-ui], [role='radiogroup'][data-ui]");
-            console.warn("[autofill] WB skip aria-hidden widget (no QA_ host?)", {
+            console.warn("[autofill] WB skip aria-hidden widget (no QA_/CA_ host?)", {
               type: t,
               name: el.name || "",
               hostUi: host ? host.getAttribute("data-ui") : null,
@@ -192,26 +195,18 @@
       if (scope) {
         const labelledby = inp.getAttribute && inp.getAttribute("aria-labelledby");
         const byId = textOfIdsScoped(scope, labelledby);
-        if (byId) {
-          return byId
-            .replace(/\s*\(Optional\)\s*$/i, "")
-            .replace(/\s*\*\s*$/, "")
-            .slice(0, 200);
-        }
+        if (byId) return cleanQuestionTitle(byId);
         const wrap = inp.closest && inp.closest("label");
-        if (wrap && clean(wrap.innerText)) {
-          return clean(wrap.innerText)
-            .replace(/\s*\(Optional\)\s*$/i, "")
-            .replace(/\s*\*\s*$/, "")
-            .slice(0, 200);
-        }
+        if (wrap && clean(wrap.innerText)) return cleanQuestionTitle(wrap.innerText);
       }
     } catch {}
     return "";
   }
 
+  // Required fields render a "*" before (custom questions) or after the label.
   function cleanQuestionTitle(t) {
     return clean(t)
+      .replace(/^\*\s*/, "")
       .replace(/\s*\(Optional\)\s*$/i, "")
       .replace(/\s*\*\s*$/, "")
       .slice(0, 200);
@@ -361,7 +356,7 @@
   }
 
   // Workable multi-select checkboxes use a unique name per option but share
-  // data-ui="QA_*" on the enclosing fieldset / role=group host.
+  // data-ui="QA_*" / "CA_*" on the enclosing fieldset / role=group host.
   function applicationGroupInputs(root) {
     const host = applicationQuestionHost(root);
     if (!host) return null;
@@ -546,7 +541,7 @@
       out.address = addr
         ? { value: String(addr.value || ""), name: addr.name || "", id: addr.id || "" }
         : null;
-      const hosts = form ? form.querySelectorAll('[data-ui^="QA_"], [data-ui^="qa_"]') : [];
+      const hosts = form ? form.querySelectorAll('[data-ui^="QA_"], [data-ui^="qa_"], [data-ui^="CA_"]') : [];
       for (const h of hosts) {
         const ui = h.getAttribute("data-ui") || "";
         const radios = [...h.querySelectorAll('input[type="radio"]')];
