@@ -172,7 +172,17 @@
     if (/^--/.test(t) || /^-+$/.test(t)) return true; // "-- No answer --", "----"
     if (/^(select|choose|none|n\/a)$/.test(t)) return true;
     if (/(^|_)no_?selection$/.test(normText(opt.value))) return true; // ATS sentinel
+    // ApplyToJob EEO selects open on "Decline to answer" (value "0"): the page's
+    // default, not the candidate's answer.
+    if (sel.selectedIndex === 0 && isDeclineText(t)) {
+      const defaults = [...sel.options].filter((o) => o.defaultSelected);
+      if (!defaults.length || defaults[0] === opt) return true;
+    }
     return false;
+  }
+
+  function isDeclineText(t) {
+    return /^(i )?(decline|choose not|prefer not|do not wish|don.?t wish|wish not)\b/.test(t);
   }
 
   function selectOption(sel, want) {

@@ -121,7 +121,35 @@
         if (q) return q;
       }
     } catch {}
-    return labelForControl(root);
+    const own = labelForControl(root);
+    try {
+      const inputs = groupInputs(root);
+      if (inputs.length > 1 && inputs.some((i) => clean(optionTextFor(i)) === clean(own))) {
+        const title = sectionTitleFor(inputs);
+        if (title) return title;
+      }
+    } catch {}
+    return own;
+  }
+
+  // A group labelled only by its options (ApplyToJob's veteran radios) takes the
+  // bold heading of the control-free block just before it ("Invitation for Job
+  // Applicants to Self-Identify as a U.S. Veteran").
+  function sectionTitleFor(inputs) {
+    let box = inputs[0].parentElement;
+    while (box && !inputs.every((i) => box.contains(i))) box = box.parentElement;
+    for (let depth = 0; box && depth < 4; depth++, box = box.parentElement) {
+      if (box.tagName === "FORM" || box.tagName === "BODY") return "";
+      for (let prev = box.previousElementSibling; prev; prev = prev.previousElementSibling) {
+        if (prev.querySelector("input, select, textarea, button")) return "";
+        const head = prev.matches("strong, b, h1, h2, h3, h4, h5, h6, legend")
+          ? prev
+          : prev.querySelector("strong, b, h1, h2, h3, h4, h5, h6, legend");
+        if (head && clean(head.innerText)) return clean(head.innerText).slice(0, 200);
+        if (clean(prev.innerText)) return "";
+      }
+    }
+    return "";
   }
 
   // Score how well an option (label/value) matches a wanted answer. Exact wins

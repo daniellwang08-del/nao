@@ -372,8 +372,8 @@
       try {
         const l = document.querySelector('label[for="' + CSS.escape(inp.id) + '"]');
         // Skip visually-hidden helper labels ("Attach") in favor of richer sources.
-        if (l && clean(l.innerText) && !/visually-hidden/.test(l.className || "")) {
-          return clean(l.innerText).slice(0, 200);
+        if (l && labelOwnText(l) && !/visually-hidden/.test(l.className || "")) {
+          return labelOwnText(l).slice(0, 200);
         }
       } catch {}
     }
@@ -443,7 +443,7 @@
       }
     } catch {}
     const wrap = inp.closest && inp.closest("label");
-    if (wrap && clean(wrap.innerText)) return clean(wrap.innerText).slice(0, 200);
+    if (wrap && labelOwnText(wrap)) return labelOwnText(wrap).slice(0, 200);
     const labelledby = inp.getAttribute && inp.getAttribute("aria-labelledby");
     const byId = textOfIds(labelledby);
     if (byId) return byId.slice(0, 200);
@@ -508,6 +508,15 @@
     if (above) return above.slice(0, 200);
     if (inp.parentElement) return clean(inp.parentElement.innerText).slice(0, 200);
     return "";
+  }
+
+  // A <label> wrapping its <select> (ApplyToJob) reads "Gender Decline to answer
+  // Female Male" through innerText; the question is the text outside the control.
+  function labelOwnText(l) {
+    if (!l.querySelector("select, textarea")) return clean(l.innerText);
+    const copy = l.cloneNode(true);
+    copy.querySelectorAll("select, textarea").forEach((n) => n.remove());
+    return clean(copy.textContent);
   }
 
   // Widget names that say nothing about the question ("Select", "textbox").
