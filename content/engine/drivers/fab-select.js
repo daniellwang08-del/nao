@@ -80,9 +80,47 @@
     return clean(it.text || it.label || it.name || it.abbr || "");
   }
 
-  function itemList(toggle) {
+  // Content scripts run in an isolated world where the fiber expandos do not
+  // exist, so outside the page world the props come from page-bridge.js.
+  function bridgeCall(toggle, op, index) {
+    try {
+      toggle.removeAttribute("data-af-fab-items");
+      toggle.removeAttribute("data-af-fab-result");
+      toggle.setAttribute("data-af-fab-op", op);
+      if (index != null) toggle.setAttribute("data-af-fab-index", String(index));
+      toggle.dispatchEvent(new CustomEvent("__af_fab", { bubbles: true }));
+      if (op === "items") {
+        const raw = toggle.getAttribute("data-af-fab-items");
+        return raw ? JSON.parse(raw) : null;
+      }
+      return toggle.getAttribute("data-af-fab-result") === "ok";
+    } catch {
+      return null;
+    } finally {
+      toggle.removeAttribute("data-af-fab-op");
+      toggle.removeAttribute("data-af-fab-index");
+    }
+  }
+
+  /** {items, selected, multi, required} from the fiber, or through the bridge. */
+  function fabricState(toggle) {
     const p = fabricProps(toggle);
-    return ((p && p.items) || []).map(itemText).filter(Boolean);
+    if (p) {
+      return {
+        items: p.items,
+        selected: (Array.isArray(p.selectedItems) && p.selectedItems.length) || (Array.isArray(p.selectedValues) && p.selectedValues.length) || 0,
+        multi: !!p.canSelectMultiple,
+        required: !!(p.required || p.isRequired),
+        direct: true,
+      };
+    }
+    const viaBridge = bridgeCall(toggle, "items");
+    return viaBridge && Array.isArray(viaBridge.items) && viaBridge.items.length ? { ...viaBridge, direct: false } : null;
+  }
+
+  function itemList(toggle) {
+    const st = fabricState(toggle);
+    return ((st && st.items) || []).map(itemText).filter(Boolean);
   }
 
   function pickItem(items, want) {
@@ -184,16 +222,16 @@
     },
     extract(root) {
       const sel = hiddenSelectOf(root);
-      const p = fabricProps(root);
+      const st = fabricState(root);
       return {
         kind: "custom",
         label: fieldLabel(root),
         required:
           !!(sel && sel.required) ||
-          !!(p && (p.required || p.isRequired)) ||
+          !!(st && st.required) ||
           (root.getAttribute && /required/i.test(root.getAttribute("aria-label") || "")),
-        multi: !!(p && p.canSelectMultiple),
-        options: itemList(root),
+        multi: !!(st && st.multi),
+        options: ((st && st.items) || []).map(itemText).filter(Boolean),
       };
     },
     harvestOptions(root) {
@@ -210,12 +248,18 @@
     async write(root, answer) {
       const want = answer.option || answer.value || "";
       if (!want) return false;
-      const p = fabricProps(root);
-      const items = (p && p.items) || [];
+      const st = fabricState(root);
+      const items = (st && st.items) || [];
       const item = pickItem(items, want);
       if (!item) return false;
       if (normText(toggleValue(root)) && textsMatch(toggleValue(root), itemText(item))) return true;
-      return commitItem(root, item);
+      if (st.direct) return commitItem(root, item);
+      if (!bridgeCall(root, "commit", items.indexOf(item))) return false;
+      // The toggle re-renders with the picked label once React commits.
+      for (let i = 0; i < 10 && !textsMatch(toggleValue(root), itemText(item)); i++) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      return true;
     },
   });
 })();

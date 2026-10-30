@@ -504,6 +504,54 @@
     }
   }
 
+  function isMonthYearInput(el) {
+    return !!el && /^mm\s*\/\s*yyyy$/i.test(String(el.getAttribute("placeholder") || "").trim());
+  }
+
+  // Edu/exp Start and End dates are masked react-datepicker inputs (MM/YYYY).
+  // The mask wipes a pasted "09/2015" but formats bare digits ("092015") itself,
+  // so write digits, fall back to one keystroke at a time, and check it held.
+  async function setMonthYear(el, value) {
+    const s = String(value || "").trim();
+    const m = s.match(/^(\d{1,2})\D+(\d{4})$/) || s.match(/^(\d{4})\D+(\d{1,2})/);
+    if (!el || !m) return false;
+    const [month, year] = m[1].length === 4 ? [m[2], m[1]] : [m[1], m[2]];
+    const mm = month.padStart(2, "0");
+    const want = `${mm}/${year}`;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const closePicker = () => {
+      try {
+        el.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      } catch {}
+    };
+    if (el.value === want) return true;
+    setEditorField(el, mm + year);
+    await sleep(120);
+    closePicker();
+    await sleep(60);
+    if (el.value === want) return true;
+
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+    try {
+      el.focus({ preventScroll: true });
+    } catch {}
+    setter.call(el, "");
+    el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
+    for (const ch of mm + year) {
+      const tracker = el._valueTracker;
+      if (tracker && typeof tracker.setValue === "function") tracker.setValue(el.value);
+      setter.call(el, el.value + ch);
+      el.dispatchEvent(new InputEvent("input", { bubbles: true, cancelable: true, inputType: "insertText", data: ch }));
+      await sleep(25);
+    }
+    closePicker();
+    try {
+      el.blur();
+    } catch {}
+    await sleep(80);
+    return el.value === want;
+  }
+
   function editorFieldInvalid(el) {
     if (!el) return false;
     try {
@@ -523,6 +571,8 @@
       'input[name]:not([type="checkbox"]):not([type="hidden"]):not([type="file"]), textarea[name]'
     );
     for (const el of fields) {
+      // Re-pasting "MM/YYYY" through the date mask would wipe it.
+      if (isMonthYearInput(el)) continue;
       const v = el.value;
       if (v != null && String(v).trim() && setEditorField(el, v)) n++;
     }
@@ -618,6 +668,8 @@
     uploadResume,
     setEditorField,
     commitEditorFields,
+    isMonthYearInput,
+    setMonthYear,
     editorFieldInvalid,
     debugDump,
   };

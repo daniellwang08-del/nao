@@ -12,7 +12,39 @@
     return (el.closest && el.closest("form, fieldset, [role='group'], [role='radiogroup']")) || document;
   }
 
+  // ApplyToJob (JazzHR) checkbox questions give every option its own name,
+  // "resumator-checkbox-<question>-<n>", and label the question on a hidden
+  // "resumator-questionnaire-q<question>" input. One question, one group.
+  const ATJ_CHECKBOX = /^resumator-checkbox-(\d+)-\d+$/;
+
+  function atjQuestion(el) {
+    const m = el && el.type === "checkbox" && ATJ_CHECKBOX.exec(el.name || "");
+    return m ? m[1] : null;
+  }
+
+  function atjGroupInputs(root) {
+    const q = atjQuestion(root);
+    if (!q) return null;
+    const scope = (root.closest && root.closest("form")) || document;
+    return [...scope.querySelectorAll('input[type="checkbox"]')].filter((x) => atjQuestion(x) === q);
+  }
+
+  function atjQuestionTitle(root) {
+    const q = atjQuestion(root);
+    const lab = q && document.getElementById("resumator-questionnaire-q" + q + "-label");
+    return lab ? clean(lab.innerText).slice(0, 200) : "";
+  }
+
+  // Yes / No answers are one choice even when the page draws them as checkboxes.
+  function isExclusivePair(group) {
+    if (group.length !== 2) return false;
+    const opts = group.map((i) => clean(optionTextFor(i)).toLowerCase()).sort();
+    return opts[0] === "no" && opts[1] === "yes";
+  }
+
   function groupInputs(root) {
+    const atj = atjGroupInputs(root);
+    if (atj && atj.length) return atj;
     try {
       if (AF.workable && AF.workable.applicationGroupInputs) {
         const wb = AF.workable.applicationGroupInputs(root);
@@ -40,6 +72,8 @@
   }
 
   function groupLabel(root) {
+    const atjTitle = atjQuestionTitle(root);
+    if (atjTitle) return atjTitle;
     const fs = root.closest && root.closest("fieldset");
     if (fs) {
       const lg = fs.querySelector("legend");
@@ -321,7 +355,7 @@
           !!(AF.manatal && AF.manatal.isRequiredControl && AF.manatal.isRequiredControl(root)) ||
           !!(AF.jobdiva && AF.jobdiva.isRequiredControl && AF.jobdiva.isRequiredControl(root)) ||
           !!(AF.icims && AF.icims.isRequiredControl && AF.icims.isRequiredControl(root)),
-        multi: t === "checkbox" && group.length > 1,
+        multi: t === "checkbox" && group.length > 1 && !isExclusivePair(group),
         options: leverGroupOptions(root, group),
         name: root.name || "",
       };
@@ -351,7 +385,8 @@
     async write(root, answer) {
       const t = (root.type || "radio").toLowerCase();
       const group = groupInputs(root);
-      const multi = t === "checkbox" && group.length > 1;
+      const exclusive = t === "checkbox" && isExclusivePair(group);
+      const multi = t === "checkbox" && group.length > 1 && !exclusive;
       if (AF.lever && AF.lever.isLeverPage && AF.lever.isLeverPage()) {
         return writeLeverGroup(root, answer, multi);
       }
@@ -359,6 +394,20 @@
         Array.isArray(answer.option_values) && answer.option_values.length
           ? answer.option_values
           : [answer.option || answer.value].filter(Boolean);
+      if (exclusive) {
+        // Clears the other box too, so an earlier pass that ticked both is repaired.
+        const best = values.length ? bestOptionFor(group, clean(values[0]).toLowerCase()) : null;
+        if (!best) return false;
+        for (const inp of group) {
+          if (inp !== best && inp.checked) {
+            try {
+              inp.click();
+            } catch {}
+          }
+        }
+        if (!best.checked) activateOption(best);
+        return !!best.checked && group.every((i) => i === best || !i.checked);
+      }
       // Ashby race/ethnicity (and similar): when the answer is a single option,
       // clear any previously checked siblings first. A prior buggy pass may have
       // checked every box; choose() alone only adds matches and never unchecks.

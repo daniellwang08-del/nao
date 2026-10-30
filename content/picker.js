@@ -1575,6 +1575,9 @@
     const v = String(value || "").trim();
     if (!input || !v) return false;
     try {
+      if (AF.workable && AF.workable.isMonthYearInput && AF.workable.isMonthYearInput(input)) {
+        return await AF.workable.setMonthYear(input, v);
+      }
       const wbSet =
         AF.workable && AF.workable.setEditorField ? AF.workable.setEditorField.bind(AF.workable) : null;
       if (wbSet && wbSet(input, v)) {
@@ -1623,14 +1626,21 @@
     return wbEditor(sectionUi);
   }
 
-  async function wbSaveEditor(sectionUi) {
+  // An editor left open blocks the whole form ("You have unsaved changes"), so
+  // one that will not save after a repair pass is cancelled rather than kept.
+  async function wbSaveEditor(sectionUi, repair) {
     const sec = wbSection(sectionUi);
     if (!sec) return false;
     const editor = sec.querySelector('[data-ui="editor"]');
     if (!editor) return false;
     const save = editor.querySelector('[data-ui="save-section"]');
     if (!save) return false;
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt === 2 && repair) {
+        try {
+          await repair(editor);
+        } catch {}
+      }
       await wbCommitEditor(editor);
       clickButton(save);
       const closed = await wbWait(() => !sec.querySelector('[data-ui="editor"]'), 4000, 100);
@@ -1639,7 +1649,26 @@
         return true;
       }
     }
+    await wbCancelEditor(sectionUi);
     return false;
+  }
+
+  async function wbCancelEditor(sectionUi) {
+    const sec = wbSection(sectionUi);
+    const editor = sec && sec.querySelector('[data-ui="editor"]');
+    if (!editor) return true;
+    const cancel = editor.querySelector('[data-ui="cancel-section"]');
+    console.warn("[autofill] WB editor would not save, cancelling it so the form can be submitted", sectionUi);
+    if (!cancel) return false;
+    clickButton(cancel);
+    return wbWait(() => !sec.querySelector('[data-ui="editor"]'), 3000, 100);
+  }
+
+  /** No edu/exp editor may stay open when the prep hands the form back. */
+  async function wbCloseOpenEditors() {
+    for (const sectionUi of ["education", "experience"]) {
+      if (wbEditor(sectionUi)) await wbSaveEditor(sectionUi);
+    }
   }
 
   async function wbSetCurrent(editor, current) {
@@ -1711,8 +1740,17 @@
       if (ok) n++;
     }
     wbDateSnapshot(editor, "edu-pre-save");
-    if (!n) return false;
-    return wbSaveEditor("education");
+    if (!n) {
+      await wbCancelEditor("education");
+      return false;
+    }
+    return wbSaveEditor("education", async (ed) => {
+      if (e.field_of_study) await wbSetField(ed.querySelector('[name="field_of_study"]'), e.field_of_study);
+      if (e.degree) await wbSetField(ed.querySelector('[name="degree"]'), e.degree);
+      await wbSetField(ed.querySelector('[name="school"]'), e.school);
+      if (e.start) await wbSetField(ed.querySelector('[name="start_date"]'), e.start);
+      if (e.end) await wbSetField(ed.querySelector('[name="end_date"]'), e.end);
+    });
   }
 
   async function wbFillExperienceEntry(entry) {
@@ -1764,8 +1802,17 @@
     if (e.start) await wbSetField(editor.querySelector('[name="start_date"]'), e.start);
     if (!e.current && e.end) await wbSetField(editor.querySelector('[name="end_date"]'), e.end);
     wbDateSnapshot(editor, "exp-pre-save");
-    if (!n) return false;
-    return wbSaveEditor("experience");
+    if (!n) {
+      await wbCancelEditor("experience");
+      return false;
+    }
+    return wbSaveEditor("experience", async (ed) => {
+      if (e.company) await wbSetField(ed.querySelector('[name="company"]'), e.company);
+      if (e.description) await wbSetField(ed.querySelector('textarea[name="summary"]'), e.description);
+      await wbSetField(ed.querySelector('[name="title"]'), e.title);
+      if (e.start) await wbSetField(ed.querySelector('[name="start_date"]'), e.start);
+      if (!e.current && e.end) await wbSetField(ed.querySelector('[name="end_date"]'), e.end);
+    });
   }
 
   function wbAddressText(addr) {
@@ -1833,6 +1880,11 @@
       } catch (err) {
         console.warn("[autofill] WB exp entry threw", i, err && err.message);
       }
+    }
+    try {
+      await wbCloseOpenEditors();
+    } catch (err) {
+      console.warn("[autofill] WB closing editors threw", err && err.message);
     }
     console.log("[autofill] WB prep done", { filledExp, filledEdu, filledAddress });
     return { filledExp, filledEdu, filledAddress };

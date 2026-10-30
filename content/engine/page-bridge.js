@@ -212,6 +212,67 @@
     true
   );
 
+  // BambooHR Fabric selects keep their items and onChange on the React fiber,
+  // which only this world can read. The isolated driver sets data-af-fab-op
+  // ("items" | "commit", with data-af-fab-index) on the toggle and fires
+  // "__af_fab"; the answer goes back in data-af-fab-items / data-af-fab-result.
+  function fabricProps(el) {
+    let f = null;
+    try {
+      const k = Object.keys(el).find((x) => x.startsWith("__reactFiber") || x.startsWith("__reactInternalInstance"));
+      f = k ? el[k] : null;
+    } catch {}
+    for (let i = 0; f && i < 24; i++) {
+      const p = f.memoizedProps || {};
+      if (Array.isArray(p.items) && p.items.length) return p;
+      f = f.return;
+    }
+    return null;
+  }
+
+  function fabCommit(p, item) {
+    for (const fn of [p.onChange, p.onSelect]) {
+      if (typeof fn !== "function") continue;
+      try {
+        fn(item);
+        return true;
+      } catch {}
+    }
+    if (typeof p.onChange === "function") {
+      try {
+        p.onChange([item]);
+        return true;
+      } catch {}
+    }
+    return false;
+  }
+
+  document.addEventListener(
+    "__af_fab",
+    (e) => {
+      const el = e.target;
+      if (!el || el.nodeType !== 1) return;
+      const op = el.getAttribute("data-af-fab-op");
+      const p = fabricProps(el);
+      try {
+        if (op === "items") {
+          const items = p
+            ? p.items.map((it) => (typeof it === "string" ? { text: it } : { text: String(it.text || it.label || it.name || ""), abbr: it.abbr ? String(it.abbr) : "" }))
+            : [];
+          const selected = p && Array.isArray(p.selectedValues) ? p.selectedValues.length : 0;
+          el.setAttribute("data-af-fab-items", JSON.stringify({ items, selected, multi: !!(p && p.canSelectMultiple), required: !!(p && (p.required || p.isRequired)) }));
+        } else if (op === "commit") {
+          const idx = Number(el.getAttribute("data-af-fab-index"));
+          const item = p && p.items[idx];
+          el.setAttribute("data-af-fab-result", item && fabCommit(p, item) ? "ok" : "fail");
+        }
+      } catch {
+        el.setAttribute("data-af-fab-result", "fail");
+      }
+    },
+    true
+  );
+
   document.addEventListener(
     "__af_page_click",
     (e) => {
