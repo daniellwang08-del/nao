@@ -5,6 +5,8 @@ import {
   RETRYABLE,
   appliedToday,
   arrangeQueue,
+  closedWithoutSubmit,
+  companyKey,
   easeLabel,
   filterHistory,
   formatDuration,
@@ -67,6 +69,28 @@ test("nextRunnable respects the per-company daily cap", () => {
   assert.equal(nextRunnable(queue, { history, runs: {}, perCompany: 1, now: NOW }), 1);
   assert.equal(nextRunnable(queue, { history, runs: { y: { company: "Beta" } }, perCompany: 1, now: NOW }), -1);
   assert.equal(nextRunnable([], { perCompany: 0 }), -1);
+});
+
+test("nextRunnable never starts a second run at a company with a live run", () => {
+  const queue = [q("a", 1, 90, { company: "Anika Systems, Inc." }), q("b", 1, 80, { company: "Beta" })];
+  const runs = { live: { company: "Anika Systems" } };
+  assert.equal(nextRunnable(queue, { history: {}, runs, perCompany: 0, now: NOW }), 1);
+  assert.equal(nextRunnable(queue.slice(0, 1), { history: {}, runs, perCompany: 0, now: NOW }), -1);
+  assert.equal(nextRunnable(queue, { history: {}, runs: {}, perCompany: 0, now: NOW }), 0);
+});
+
+test("companyKey ignores case, punctuation and legal suffixes", () => {
+  assert.equal(companyKey("Anika Systems, Inc."), "anika systems");
+  assert.equal(companyKey(" ANIKA systems "), "anika systems");
+  assert.equal(companyKey("Idenhaus Consulting, Inc."), "idenhaus consulting");
+  assert.equal(companyKey(""), "");
+});
+
+test("a submitted job whose tab is closed does not go back to the queue", () => {
+  const left = { status: "needs_you", at: NOW - 1000, tabOpen: true };
+  assert.equal(closedWithoutSubmit(left, NOW).status, "later");
+  assert.equal(closedWithoutSubmit({ ...left, submitted: true }, NOW), null);
+  assert.equal(closedWithoutSubmit({ status: "applied" }, NOW), null);
 });
 
 test("stageOf follows the runner's messages", () => {

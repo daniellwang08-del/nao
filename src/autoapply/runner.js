@@ -274,7 +274,14 @@ async function submitAndConfirm(tab, job) {
   const clicked = await pageCall(tabId, "submit", null, baseline.submit.frameId);
   if (!clicked.length || !clicked[0].clicked) throw needsYou("Could not click Submit. Submit it on the page.");
   report({ submittedAt: Date.now() });
+  // Before waiting on the site: a run that never sees a confirmation must still never submit this job again.
+  await api.recordSubmitted(jobId).catch(() => {});
 
+  // The site held the application back (form errors, CAPTCHA, unanswered code): nothing was sent.
+  const notSent = async (message) => {
+    await api.clearSubmitted(jobId).catch(() => {});
+    return needsYou(message);
+  };
   for (let round = 0; round < 3; round++) {
     const outcome = await waitForOutcome(tabId, baseline);
     if (outcome.kind === "confirmed") return outcome.via;
@@ -282,16 +289,20 @@ async function submitAndConfirm(tab, job) {
       if (console_) console_.otpWait(jobId, true);
       try {
         await solveCode(tabId, job, sinceSec);
+      } catch (err) {
+        throw err instanceof Stop && err.status === "needs_you" ? await notSent(err.message) : err;
       } finally {
         if (console_) console_.otpWait(jobId, false);
       }
       continue;
     }
-    if (outcome.kind === "captcha") throw needsYou("The site wants a CAPTCHA. Solve it and submit.");
-    if (outcome.kind === "errors") throw needsYou("The form was rejected: " + outcome.state.errors.join("; "));
-    throw needsYou("Submitted, but no confirmation showed up. Check the page.");
+    if (outcome.kind === "captcha") throw await notSent("The site wants a CAPTCHA. Solve it and submit.");
+    if (outcome.kind === "errors") throw await notSent("The form was rejected: " + outcome.state.errors.join("; "));
+    throw needsYou("Submitted, but no confirmation showed up. Check the page. Auto-apply will not submit this job again.", {
+      submitted: true,
+    });
   }
-  throw needsYou("The site kept asking for a code. Finish it on the page.");
+  throw await notSent("The site kept asking for a code. Finish it on the page.");
 }
 
 // ── main ────────────────────────────────────────────────────────────────────

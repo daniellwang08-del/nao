@@ -279,6 +279,14 @@ export const refreshInbox = (timezone) =>
 export const markApplied = (jobIds) =>
   apiFetch("/jobs/valid/applied/batch", { method: "POST", body: { job_ids: jobIds } });
 
+/** Submit was clicked; the server refuses to apply to this job again even if the site never confirms. */
+export const recordSubmitted = (jobId) =>
+  apiFetch(`/assistant/jobs/${encodeURIComponent(jobId)}/submitted`, { method: "POST" });
+
+/** The site turned the submit down (form errors, CAPTCHA), so the job may be applied to again. */
+export const clearSubmitted = (jobId) =>
+  apiFetch(`/assistant/jobs/${encodeURIComponent(jobId)}/submitted`, { method: "DELETE" });
+
 export const reportJobInvalid = (jobId, reason) =>
   apiFetch(`/jobs/valid/${encodeURIComponent(jobId)}/report-invalid`, {
     method: "POST",

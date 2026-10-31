@@ -61,7 +61,17 @@ export function arrangeQueue(queue, { order = "ease", minScore = 0, pinned = [],
 /** History statuses whose job may be picked up again by the queue. */
 export const RETRYABLE = new Set(["failed", "later"]);
 
-const companyKey = (name) => String(name || "").trim().toLowerCase();
+const COMPANY_SUFFIX = /\s+(inc|incorporated|llc|ltd|limited|corp|corporation|co|gmbh|plc)$/;
+
+/** "Anika Systems, Inc." and "anika systems" are one company. */
+export function companyKey(name) {
+  let key = String(name || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+  for (let i = 0; i < 2; i++) key = key.replace(COMPANY_SUFFIX, "").trim();
+  return key;
+}
 
 /** Applications per company today: submitted ones in history plus live runs. */
 export function companyLoad(history, runs, now = Date.now()) {
@@ -76,11 +86,20 @@ export function companyLoad(history, runs, now = Date.now()) {
   return load;
 }
 
-/** Index of the next queue entry that respects the per-company cap; -1 if none. */
+/**
+ * Index of the next queue entry that respects the per-company cap; -1 if none.
+ * A company with a live run waits for it to finish: two runs at once would both
+ * pass the server's applied-at-this-company check before either is marked.
+ */
 export function nextRunnable(queue, { history, runs, perCompany = 0, now = Date.now() } = {}) {
-  if (!perCompany) return queue.length ? 0 : -1;
-  const load = companyLoad(history, runs, now);
-  return queue.findIndex((q) => !companyKey(q.company) || (load.get(companyKey(q.company)) || 0) < perCompany);
+  const live = new Set(Object.values(runs || {}).map((r) => companyKey(r.company)).filter(Boolean));
+  const load = perCompany ? companyLoad(history, runs, now) : null;
+  return queue.findIndex((q) => {
+    const k = companyKey(q.company);
+    if (!k) return true;
+    if (live.has(k)) return false;
+    return !perCompany || (load.get(k) || 0) < perCompany;
+  });
 }
 
 /** Where a live run is, from its status and the runner's step messages. */
@@ -114,10 +133,12 @@ export const CLOSED_UNSUBMITTED = "You closed the tab without submitting, so it 
 /**
  * The user closed a tab auto-apply left for them without submitting: they
  * want to come back to it, so it joins the end of the queue as "apply later".
- * Null when the entry is not one waiting on them.
+ * Null when the entry is not one waiting on them, or auto-apply already
+ * submitted it (the site just never confirmed), since applying again would
+ * send a second application.
  */
 export function closedWithoutSubmit(entry, now = Date.now()) {
-  if (!entry || !LEFT_FOR_USER.has(entry.status)) return null;
+  if (!entry || !LEFT_FOR_USER.has(entry.status) || entry.submitted) return null;
   return { ...entry, status: "later", message: CLOSED_UNSUBMITTED, at: now, tabOpen: false };
 }
 

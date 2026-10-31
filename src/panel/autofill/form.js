@@ -51,6 +51,7 @@ let writePassSeq = 0;
 
 const CHECK_TITLES = {
   already_applied: "You already applied to this job",
+  submitted: "This application was already submitted",
   applied_company: "You already applied at this company",
   hidden: "This job is hidden from your list",
 };

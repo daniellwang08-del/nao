@@ -341,7 +341,13 @@ function startRun(job, { refillTabId = null } = {}) {
   timers.set(
     job.id,
     setTimeout(
-      () => void finishRun(job.id, { status: "needs_you", message: `Took longer than ${limitMin} minutes. The page is left open for you.` }),
+      () =>
+        void finishRun(job.id, {
+          status: "needs_you",
+          message: `Took longer than ${limitMin} minutes. The page is left open for you.`,
+          // Still waiting on the site after Submit: treat it as sent.
+          submitted: Boolean(store.runs[job.id] && store.runs[job.id].submittedAt),
+        }),
       limitMin * 60_000,
     ),
   );
@@ -383,7 +389,15 @@ async function refillTab(jobId, tabId) {
   if (store.runs[jobId]) return { ok: false, error: "NAO is already filling this application." };
   if (!(await chrome.tabs.get(tabId).catch(() => null))) return { ok: false, error: "The application tab is gone." };
   const h = entryFor(jobId) || {};
-  const job = { id: jobId, title: h.title || "Application", company: h.company || "", platform: h.platform || "", score: h.score, url: h.url || "" };
+  const job = {
+    id: jobId,
+    title: h.title || "Application",
+    company: h.company || "",
+    platform: h.platform || "",
+    score: h.score,
+    url: h.url || "",
+    submitted: Boolean(h.submitted),
+  };
   // The run reports into history again when it ends; until then it shows as a live run.
   if (store.history[jobId]) {
     const history = { ...store.history };
@@ -427,10 +441,11 @@ async function finishRun(jobId, outcome) {
   otpWaiting.delete(jobId);
 
   const tabId = outcome.tabId != null ? outcome.tabId : run.tabId;
+  if (run.submitted) outcome = { ...outcome, submitted: true };
   let status = outcome.status || "failed";
   const tabGone = tabId != null && !(await chrome.tabs.get(tabId).catch(() => null));
   // The user closed the run's tab mid-way: same as closing a hand-off tab.
-  if (tabGone && closedWithoutSubmit({ status })) {
+  if (tabGone && closedWithoutSubmit({ status, submitted: outcome.submitted })) {
     status = "later";
     outcome = { ...outcome, message: CLOSED_UNSUBMITTED };
   }
@@ -470,6 +485,7 @@ async function finishRun(jobId, outcome) {
     url: run.url,
     tabId,
     tabOpen,
+    ...(outcome.submitted ? { submitted: true } : {}),
   };
   const runs = { ...store.runs };
   delete runs[jobId];
