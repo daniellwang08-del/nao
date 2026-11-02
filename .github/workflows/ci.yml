@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm test
+
+  # Each new manifest version becomes a release with nao-extension.zip, so the
+  # web app's download link (releases/latest/download/nao-extension.zip) always
+  # serves the newest build.
+  release:
+    needs: test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Read version
+        id: version
+        run: echo "tag=v$(node -p "require('./manifest.json').version")" >> "$GITHUB_OUTPUT"
+      - name: Check for an existing release
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Package and publish
+        if: steps.existing.outputs.found == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          npm run package
+          gh release create "${{ steps.version.outputs.tag }}" dist/nao-extension.zip \
+            --title "NAO extension ${{ steps.version.outputs.tag }}" \
+            --notes "Download nao-extension.zip, unzip it, then load the nao-extension folder from chrome://extensions with Developer mode on (Load unpacked). To update, replace the folder and click reload on the NAO card." \
+            --latest
