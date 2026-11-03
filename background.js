@@ -242,6 +242,7 @@ async function openApplicationTabOnce(jobId, url) {
       const matches = await chrome.tabs.query({ url });
       const hit = (matches || []).find((t) => t.id != null);
       if (hit && hit.id != null) {
+        await rememberJobTab(hit.id, jobId);
         await chrome.tabs.update(hit.id, { active: true });
         if (hit.windowId != null) {
           await chrome.windows.update(hit.windowId, { focused: true }).catch(() => {});
@@ -252,7 +253,8 @@ async function openApplicationTabOnce(jobId, url) {
       /* exact-url query can fail for some schemes */
     }
     if (!reused) {
-      await chrome.tabs.create({ url, active: true });
+      const tab = await chrome.tabs.create({ url, active: true });
+      if (tab && tab.id != null) await rememberJobTab(tab.id, jobId);
     }
   })().finally(() => {
     // Keep the lock briefly so a lagged duplicate handler joins this open.
@@ -327,8 +329,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 const APP_HELPER_FILES = ["content/ask-hotkey.js", "content/submit-watch.js"];
-// Corner "Fill again" button, top frame of tabs auto-apply left for the user.
-const REFILL_FAB_FILE = "content/refill-fab.js";
+// Corner "Open in NAO" button, top frame of every tab NAO opened for a job.
+const JOB_FAB_FILE = "content/job-fab.js";
 
 async function injectAppHelpers(tabId) {
   if (tabId == null) return;
@@ -352,10 +354,11 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (!tab || !tab.url || !/^https?:/i.test(tab.url)) return;
   void (async () => {
     const handOff = await handOffEntry(tabId);
+    const job = await jobForTab(tabId);
+    if (job) await injectJobFab(tabId);
     if (!(await isAppAssistArmed()) && !handOff) return;
     try {
       await injectAppHelpers(tabId);
-      if (handOff) await chrome.scripting.executeScript({ target: { tabId }, files: [REFILL_FAB_FILE] });
     } catch (err) {
       // Missing host permission is expected until the side panel requests it.
       console.warn("app helpers inject failed", tabId, err);
@@ -555,78 +558,127 @@ async function isAutoApplyConsoleOpen() {
 
 const AA_FAB_PREFIX = "aaFab:";
 
-/** What the corner button on a hand-off tab shows: a live refill, or why the tab was left. */
+// ── "Open in NAO" corner button ─────────────────────────────────────────────
+
+/** The job a tab belongs to: an auto-apply hand-off, a tab auto-apply drives, or one NAO opened for a job. */
+async function jobForTab(tabId) {
+  if (tabId == null) return null;
+  const handOff = await handOffEntry(tabId);
+  if (handOff && handOff.jobId) return { jobId: String(handOff.jobId), source: "handoff" };
+  const keys = [AA_TAB_PREFIX + tabId, "applyTabJobs"];
+  const data = await chrome.storage.session.get(keys).catch(() => ({}));
+  const driven = data && data[AA_TAB_PREFIX + tabId];
+  if (driven && driven.jobId) return { jobId: String(driven.jobId), source: "autoapply" };
+  const bound = data && data.applyTabJobs ? data.applyTabJobs[String(tabId)] : null;
+  if (bound && bound.jobId && Date.now() - Number(bound.at || 0) < APPLY_TAB_MAX_AGE_MS) {
+    return { jobId: String(bound.jobId), source: "apply" };
+  }
+  return null;
+}
+
+async function rememberJobTab(tabId, jobId) {
+  try {
+    const { applyTabJobs } = await chrome.storage.session.get("applyTabJobs");
+    await chrome.storage.session.set({
+      applyTabJobs: { ...(applyTabJobs || {}), [String(tabId)]: { jobId: String(jobId), at: Date.now() } },
+    });
+  } catch {
+    /* session storage unavailable */
+  }
+}
+
+async function injectJobFab(tabId) {
+  // The script guards against a second copy; a missing host permission just means no button.
+  await chrome.scripting.executeScript({ target: { tabId }, files: [JOB_FAB_FILE] }).catch(() => {});
+}
+
+// A tab registered for a job after it finished loading gets its button now, not on the next load.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "session") return;
+  const tabIds = new Set();
+  for (const key of Object.keys(changes)) {
+    if (!changes[key].newValue) continue;
+    if (key.startsWith(AA_HANDOFF_PREFIX)) tabIds.add(Number(key.slice(AA_HANDOFF_PREFIX.length)));
+    else if (key.startsWith(AA_TAB_PREFIX)) tabIds.add(Number(key.slice(AA_TAB_PREFIX.length)));
+    else if (key === "applyTabJobs") {
+      const before = changes[key].oldValue || {};
+      for (const id of Object.keys(changes[key].newValue)) if (!before[id]) tabIds.add(Number(id));
+    }
+  }
+  for (const tabId of tabIds) {
+    if (!Number.isFinite(tabId)) continue;
+    chrome.tabs
+      .get(tabId)
+      .then((tab) => (tab && tab.status === "complete" && /^https?:/i.test(tab.url || "") ? injectJobFab(tabId) : null))
+      .catch(() => {});
+  }
+});
+
+/** What the corner button shows: a live fill, or how auto-apply left the job. */
 async function fabState(tabId) {
-  const entry = await handOffEntry(tabId);
-  if (!entry || !entry.jobId) return { show: false };
+  const job = await jobForTab(tabId);
+  if (!job) return { show: false };
   const key = AA_FAB_PREFIX + tabId;
   const { [key]: live } = await chrome.storage.session.get(key).catch(() => ({}));
   if (live && live.state === "running" && Date.now() - Number(live.at || 0) < 15 * 60_000 && (await isAutoApplyConsoleOpen())) {
     return { show: true, state: "running", message: live.message || "" };
   }
+  if (job.source === "autoapply") return { show: true, state: "running", message: "" };
   const { [AA_HISTORY_KEY]: history } = await chrome.storage.local.get(AA_HISTORY_KEY);
-  const h = history && history[String(entry.jobId)];
-  return { show: true, state: "idle", status: (h && h.status) || "", message: (h && h.message) || "" };
+  const h = history && history[job.jobId];
+  const status = (h && h.status) || "";
+  const state = status === "filled" || status === "applied" ? "done" : status === "needs_you" ? "needs" : status === "failed" ? "error" : "idle";
+  return { show: true, state, status, message: (h && h.message) || "" };
 }
 
-/** "Fill again" pressed on a hand-off tab: the console runs it, opened in the background if needed. */
-async function requestRefill(tabId) {
-  const entry = await handOffEntry(tabId);
-  if (!entry || !entry.jobId) return { ok: false, error: "Auto-apply no longer tracks this tab." };
-  const jobId = String(entry.jobId);
-  if (await isAutoApplyConsoleOpen()) {
-    const res = await chrome.runtime.sendMessage({ type: "AA_REFILL_REQUEST", jobId, tabId }).catch(() => null);
-    if (res) return res;
-  }
-  await chrome.storage.session.set({ aaRefillPending: { jobId, tabId, at: Date.now() } });
-  await openAutoApplyConsole({ focus: false });
-  return { ok: true, opening: true };
-}
-
-const PAGE_DECISIONS = {
-  skip: { status: "skipped", message: "Skipped by you from the application page." },
-  invalid: { status: "invalid", message: "Marked invalid from the application page. Hidden from your job lists." },
-};
-
-/** Skip or Invalid job pressed on a hand-off tab: record it, then close the tab. */
-async function decideFromPage(tabId, kind) {
-  const decision = PAGE_DECISIONS[kind];
-  const entry = await handOffEntry(tabId);
-  if (!decision || !entry || !entry.jobId) return { ok: false, error: "Auto-apply no longer tracks this tab." };
-  if ((await fabState(tabId)).state === "running") return { ok: false, error: "Wait for the fill to finish first." };
-  const jobId = String(entry.jobId);
-  if (kind === "invalid") {
-    try {
-      await api.reportJobInvalid(jobId, "Marked invalid from the auto-apply application page.");
-    } catch (err) {
-      return { ok: false, error: (err && err.message) || "Could not mark the job invalid." };
+/** "Open in NAO" pressed: the side panel opens on this job (the web app when the panel cannot open). */
+function expandJob(tabId, windowId, sendResponse) {
+  // CRITICAL: sidePanel.open() needs the click's user gesture, which ends at the first await.
+  const opening = (windowId != null ? chrome.sidePanel.open({ windowId }) : Promise.reject(new Error("no window"))).then(
+    () => true,
+    (err) => {
+      console.warn("sidePanel.open (job fab) failed", err);
+      return false;
+    },
+  );
+  void (async () => {
+    const job = await jobForTab(tabId);
+    if (!job) {
+      sendResponse({ ok: false, error: "NAO no longer tracks this job on this tab." });
+      return;
     }
-  }
-  const tab = await chrome.tabs.get(tabId).catch(() => null);
-  const { [AA_HISTORY_KEY]: history } = await chrome.storage.local.get(AA_HISTORY_KEY);
-  const prev = (history && history[jobId]) || { title: (tab && tab.title) || "Application", url: (tab && tab.url) || "" };
-  const next = { ...prev, status: decision.status, message: decision.message, at: Date.now(), tabOpen: false };
-  await chrome.storage.local.set({ [AA_HISTORY_KEY]: { ...(history || {}), [jobId]: next } });
-  // Unregistered before closing, or the close would move the job to apply later.
-  await chrome.storage.session.remove([AA_HANDOFF_PREFIX + tabId, AA_FAB_PREFIX + tabId]).catch(() => {});
-  setTimeout(() => void chrome.tabs.remove(tabId).catch(() => {}), 900);
-  return { ok: true };
+    // Stored before the panel finishes opening, so a panel starting now picks it up.
+    await chrome.storage.session.set({ [PENDING_JOB_KEY]: { jobId: job.jobId, url: null, ts: Date.now() } }).catch(() => {});
+    const opened = await opening;
+    if (opened) {
+      // The panel may already be open (message) or just opening (it reads the pending job on start).
+      chrome.runtime.sendMessage({ type: "WEBAPP_OPEN_PENDING_JOB", jobId: job.jobId }, () => void chrome.runtime.lastError);
+      sendResponse({ ok: true });
+      return;
+    }
+    await chrome.storage.session.remove(PENDING_JOB_KEY).catch(() => {});
+    const origin = await getBackendUrl().catch(() => null);
+    if (!origin) {
+      sendResponse({ ok: false, error: "Could not open NAO for this job." });
+      return;
+    }
+    await chrome.tabs.create({ url: `${origin}/app/jobs?job=${encodeURIComponent(job.jobId)}`, active: true });
+    sendResponse({ ok: true, fallback: true });
+  })();
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg || !["AA_FAB_STATE", "AA_REFILL", "AA_PAGE_SKIP", "AA_PAGE_INVALID"].includes(msg.type)) return false;
+  if (!msg || !["AA_FAB_STATE", "AA_FAB_EXPAND"].includes(msg.type)) return false;
   const tabId = sender && sender.tab ? sender.tab.id : null;
   if (tabId == null || sender.id !== chrome.runtime.id) {
     sendResponse({ ok: false, show: false });
     return false;
   }
-  const work =
-    msg.type === "AA_FAB_STATE"
-      ? fabState(tabId)
-      : msg.type === "AA_REFILL"
-        ? requestRefill(tabId)
-        : decideFromPage(tabId, msg.type === "AA_PAGE_SKIP" ? "skip" : "invalid");
-  work
+  if (msg.type === "AA_FAB_EXPAND") {
+    expandJob(tabId, sender.tab.windowId, sendResponse);
+    return true;
+  }
+  fabState(tabId)
     .then(sendResponse)
     .catch((err) => sendResponse({ ok: false, show: false, error: String((err && err.message) || err) }));
   return true;

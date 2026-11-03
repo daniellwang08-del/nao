@@ -224,8 +224,8 @@ export function SettingsView({ s }) {
           onChange=${toggleAutoSubmit}
         />
         <${Toggle}
-          label="Buttons on application pages"
-          hint="Fill again, Skip and Invalid job in the corner of pages auto-apply leaves for you."
+          label="Open in NAO button on application pages"
+          hint="A corner button on job application pages that opens the job here: fill again, skip, report it, and your tailored resume."
           checked=${s.aaPageButtons}
           onChange=${(on) => savePreference("aaPageButtons", on)}
         />

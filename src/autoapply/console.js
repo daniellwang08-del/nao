@@ -373,7 +373,7 @@ async function rememberHandOff(tabId, jobId) {
   await chrome.scripting
     .executeScript({ target: { tabId, allFrames: true }, files: ["content/submit-watch.js"] })
     .catch(() => {});
-  await chrome.scripting.executeScript({ target: { tabId }, files: ["content/refill-fab.js"] }).catch(() => {});
+  await chrome.scripting.executeScript({ target: { tabId }, files: ["content/job-fab.js"] }).catch(() => {});
 }
 
 // ── "Fill again" from the page's corner button ──────────────────────────────

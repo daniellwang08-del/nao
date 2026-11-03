@@ -1,0 +1,121 @@
+// "Open in NAO" corner button: which tabs get it, what it shows, and that pressing it opens
+// the side panel on the job (or the web app when the panel cannot open).
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { test } from "node:test";
+
+const src = readFileSync(new URL("../background.js", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+const grab = (head) => {
+  const i = src.indexOf(head);
+  assert.ok(i >= 0, `missing ${head}`);
+  const j = src.indexOf("\n}\n", i);
+  return src.slice(i, j + 3);
+};
+const body = [
+  grab("async function handOffEntry(tabId) {"),
+  grab("async function jobForTab(tabId) {"),
+  grab("async function rememberJobTab(tabId, jobId) {"),
+  grab("async function fabState(tabId) {"),
+  grab("function expandJob(tabId, windowId, sendResponse) {"),
+].join("\n");
+
+function area(initial = {}) {
+  let data = { ...initial };
+  return {
+    async get(keys) {
+      const list = Array.isArray(keys) ? keys : [keys];
+      const out = {};
+      for (const k of list) if (k in data) out[k] = data[k];
+      return out;
+    },
+    async set(patch) {
+      data = { ...data, ...patch };
+    },
+    async remove(keys) {
+      for (const k of [].concat(keys)) delete data[k];
+    },
+    dump: () => data,
+  };
+}
+
+function load({ session = {}, local = {}, panelOpens = true, consoleOpen = false } = {}) {
+  const calls = { order: [], messages: [], created: [] };
+  const chrome = {
+    storage: { session: area(session), local: area(local) },
+    sidePanel: {
+      open: (opts) => {
+        calls.order.push("open");
+        calls.openedWindow = opts.windowId;
+        return panelOpens ? Promise.resolve() : Promise.reject(new Error("no gesture"));
+      },
+    },
+    runtime: { sendMessage: (m, cb) => { calls.messages.push(m); if (cb) cb(); }, lastError: null },
+    tabs: { create: async (t) => { calls.created.push(t.url); return { id: 99 }; } },
+  };
+  const make = new Function(
+    "chrome", "getBackendUrl", "isAutoApplyConsoleOpen",
+    `const AA_HANDOFF_PREFIX = "aaHandoff:"; const AA_TAB_PREFIX = "aaTab:"; const AA_FAB_PREFIX = "aaFab:";
+     const AA_HISTORY_KEY = "aaHistory"; const PENDING_JOB_KEY = "pendingWebappJob";
+     const APPLY_TAB_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+     ${body}
+     return { jobForTab, rememberJobTab, fabState, expandJob };`,
+  );
+  const fns = make(chrome, async () => "https://nao.it.com", async () => consoleOpen);
+  return { ...fns, chrome, calls };
+}
+
+const now = Date.now();
+
+test("every tab NAO opened for a job gets the button, not only hand-offs", async () => {
+  const { jobForTab } = load({
+    session: {
+      "aaHandoff:1": { jobId: "j-hand" },
+      "aaTab:2": { jobId: "j-run" },
+      applyTabJobs: { 3: { jobId: "j-apply", at: now }, 4: { jobId: "j-old", at: now - 7 * 3600_000 } },
+    },
+  });
+  assert.deepEqual(await jobForTab(1), { jobId: "j-hand", source: "handoff" });
+  assert.deepEqual(await jobForTab(2), { jobId: "j-run", source: "autoapply" });
+  assert.deepEqual(await jobForTab(3), { jobId: "j-apply", source: "apply" }); // opened from the panel or web app
+  assert.equal(await jobForTab(4), null); // stale binding
+  assert.equal(await jobForTab(5), null); // not a NAO tab
+});
+
+test("the button shows filling while auto-apply drives the tab, and how it left the job afterwards", async () => {
+  const { fabState } = load({
+    session: { "aaTab:2": { jobId: "j-run" }, "aaHandoff:1": { jobId: "j-hand" }, applyTabJobs: { 3: { jobId: "j3", at: now } } },
+    local: { aaHistory: { "j-hand": { status: "needs_you", message: "CAPTCHA on the page." } } },
+  });
+  assert.equal((await fabState(2)).state, "running");
+  assert.deepEqual(await fabState(1), { show: true, state: "needs", status: "needs_you", message: "CAPTCHA on the page." });
+  assert.equal((await fabState(3)).state, "idle");
+  assert.deepEqual(await fabState(7), { show: false });
+});
+
+test("Open in NAO opens the side panel first, then lands on the job", async () => {
+  const { expandJob, calls, chrome } = load({ session: { applyTabJobs: { 3: { jobId: "j3", at: now } } } });
+  const res = await new Promise((resolve) => {
+    expandJob(3, 11, resolve);
+    calls.order.push("returned"); // the panel must open before the handler yields
+  });
+  assert.deepEqual(calls.order.slice(0, 2), ["open", "returned"]);
+  assert.equal(calls.openedWindow, 11);
+  assert.deepEqual(res, { ok: true });
+  assert.deepEqual(calls.messages, [{ type: "WEBAPP_OPEN_PENDING_JOB", jobId: "j3" }]);
+  assert.equal(chrome.storage.session.dump().pendingWebappJob.jobId, "j3"); // a panel that is still starting reads it
+});
+
+test("when the side panel cannot open, the job opens in the web app", async () => {
+  const { expandJob, calls, chrome } = load({ session: { "aaHandoff:1": { jobId: "j1" } }, panelOpens: false });
+  const res = await new Promise((resolve) => expandJob(1, 11, resolve));
+  assert.deepEqual(res, { ok: true, fallback: true });
+  assert.deepEqual(calls.created, ["https://nao.it.com/app/jobs?job=j1"]);
+  assert.equal(chrome.storage.session.dump().pendingWebappJob, undefined);
+});
+
+test("a tab NAO no longer tracks gets a clear message", async () => {
+  const { expandJob } = load();
+  const res = await new Promise((resolve) => expandJob(5, 11, resolve));
+  assert.equal(res.ok, false);
+  assert.match(res.error, /no longer tracks/);
+});
