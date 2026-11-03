@@ -116,6 +116,20 @@ export function clearProfileCache() {
   profileCache.clear();
 }
 
+/**
+ * Password for a new job-portal account: the one the user saved in Preferences,
+ * otherwise a freshly generated one.
+ */
+export async function portalPasswordForNewAccount() {
+  try {
+    const res = await api.getPortalPassword();
+    if (res && typeof res.password === "string" && res.password) return res.password;
+  } catch {
+    /* offline or older server: generate one */
+  }
+  return generatePortalPassword();
+}
+
 // A password satisfying the usual ATS rule (iCIMS states it in the field's
 // title, Workday lists it): 8+ characters with a lowercase, an uppercase, a
 // digit and a special character. Ambiguous glyphs (l/1/O/0) are left out so

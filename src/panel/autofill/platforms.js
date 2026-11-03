@@ -5,7 +5,7 @@ import * as api from "../../api.js";
 import * as storage from "../../storage.js";
 import { setAutofill, state } from "../state.js";
 import { fetchRoleFile } from "./form.js";
-import { debugLog, delay, generatePortalPassword, getAutofillProfile, tabBroadcast, tabSend } from "./shared.js";
+import { debugLog, delay, getAutofillProfile, portalPasswordForNewAccount, tabBroadcast, tabSend } from "./shared.js";
 
 // Greenhouse "Discipline" is a fixed-taxonomy dropdown that rarely contains a
 // candidate's actual discipline, so (mirroring the Workday standard field-of-
@@ -389,7 +389,7 @@ export async function prepareIcims(tabId, ctx) {
     creds = null;
   }
   if (!creds) {
-    creds = { login, password: generatePortalPassword() };
+    creds = { login, password: await portalPasswordForNewAccount() };
   } else if (login && !creds.login) {
     creds = { ...creds, login };
   }

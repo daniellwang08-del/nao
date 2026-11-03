@@ -327,6 +327,9 @@ function localDate() {
 }
 
 /** Canonical structured profile for deterministic engines (Workday) and cover letters. */
+/** The password the user chose for job-portal accounts (Preferences), or null. */
+export const getPortalPassword = () => apiFetch("/profile/portal-password/secret");
+
 export const getAutofillProfile = (jobId) =>
   apiFetch(`/assistant/autofill-profile${qs({ job_id: jobId })}`, { timeoutMs: 45_000 });
 

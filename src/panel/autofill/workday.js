@@ -15,7 +15,7 @@ import {
   delay,
   downloadApplicationResume,
   focusGate,
-  generatePortalPassword,
+  portalPasswordForNewAccount,
   getAutofillProfile,
   submitAllowed,
   tabBroadcast,
@@ -393,7 +393,7 @@ async function workdayCredentials(email) {
     creds = null;
   }
   if (!creds) {
-    creds = { login: email, password: generatePortalPassword() };
+    creds = { login: email, password: await portalPasswordForNewAccount() };
     try {
       await storage.saveAtsCredential(userId, WD_CREDENTIAL_HOST, creds);
     } catch {
