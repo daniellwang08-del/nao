@@ -416,12 +416,27 @@ function inferFileRoleFromLabel(label) {
 function normalizeFileRolesInResults(results, specs) {
   const labelByCid = {};
   const fileCids = new Set();
+  const handleByCid = {};
   for (const f of specs || []) {
     for (const c of f.controls || []) {
       if (!c || !c.is_file) continue;
       fileCids.add(c.cid);
       labelByCid[c.cid] = c.label || f.label || "";
+      handleByCid[c.cid] = f.handle;
     }
+  }
+  // The model sometimes leaves an optional upload out of its answer (Rippling's
+  // "Cover letter"); a label naming exactly one document still gets its file.
+  const answered = new Set();
+  for (const r of results || []) for (const c of r.controls || []) answered.add(c.cid);
+  for (const cid of fileCids) {
+    if (answered.has(cid)) continue;
+    const role = strictFileRoleFromLabel(labelByCid[cid]);
+    if (!role) continue;
+    const control = { cid, value: "", kind: "file", file_role: role, needs_user: false, reason: null };
+    const row = (results || []).find((r) => r.handle === handleByCid[cid]);
+    if (row) (row.controls = row.controls || []).push(control);
+    else if (results) results.push({ handle: handleByCid[cid], controls: [control] });
   }
   for (const r of results || []) {
     for (const c of r.controls || []) {

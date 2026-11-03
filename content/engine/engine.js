@@ -450,8 +450,55 @@
         el = document.getElementById(cid);
       } catch {}
     }
+    // A form that re-rendered (Rippling re-mounts every field after parsing the
+    // resume) leaves new nodes without our marker. Controls without an id keep a
+    // cid hashed from their position, so recompute it over same-tag nodes.
+    if (!el && entry && entry.root) el = refind(cid, entry);
     if (el && entry) entry.root = el;
-    return el || (entry && entry.root) || null;
+    // Never hand back a detached node: a write there reports success while the
+    // page shows nothing.
+    const root = el || (entry && entry.root) || null;
+    return root && root.isConnected ? root : null;
+  }
+
+  function refind(cid, entry) {
+    const base = String(cid).replace(/#\d+$/, "");
+    try {
+      for (const n of document.querySelectorAll(entry.root.tagName)) {
+        if (n.hasAttribute("data-autofill-cid")) continue;
+        const idEl = entry.driver.cidEl ? entry.driver.cidEl(n) : n;
+        if (cidFor(idEl || n) === base) {
+          n.setAttribute("data-autofill-cid", cid);
+          return n;
+        }
+      }
+    } catch {}
+    return null;
+  }
+
+  // Rippling parses an uploaded resume into the form and then re-mounts every
+  // field, dropping whatever was typed or attached before the re-mount. Attach
+  // the resume first and wait for that re-mount before writing anything else.
+  function isRippling() {
+    return /(^|\.)rippling\.com$/i.test(location.hostname);
+  }
+
+  async function waitResumeParse(resumeRoot) {
+    const start = Date.now();
+    // The re-mount replaces the resume input; the parse request starts once the upload finishes.
+    while (Date.now() - start < 9000 && resumeRoot.isConnected) await delay(150);
+    if (resumeRoot.isConnected) return false;
+    while (Date.now() - start < 15000) {
+      const busy = [...document.querySelectorAll("input")].some((i) => i.disabled && /^field-/.test(i.id));
+      if (!busy && document.querySelector('input[type="file"]')) break;
+      await delay(150);
+    }
+    await delay(400);
+    return true;
+  }
+
+  function delay(ms) {
+    return new Promise((r) => setTimeout(r, ms));
   }
 
   async function writeOne(c, files) {
@@ -517,18 +564,26 @@
         gapMs = 50;
       }
     } catch {}
-    for (const r of results || []) {
-      for (const c of r.controls || []) {
-        const res = await writeOne(c, files);
-        if (res) report.push(res);
-        // Yield a macrotask between controls. Each write ends in a blur that
-        // commits the field into the form's (Apollo/React) state asynchronously;
-        // writing many controls in one synchronous burst lets React batch those
-        // commits into a single render where shared form-state merges clobber each
-        // other, leaving some just-written fields reading as "missing required
-        // field". A real gap flushes each commit before the next write.
-        await new Promise((r2) => setTimeout(r2, gapMs));
+    let ordered = (results || []).flatMap((r) => r.controls || []);
+    if (isRippling()) {
+      const first = (c) => (c.file_role === "resume" && files && files[c.cid] ? 0 : 1);
+      ordered = ordered.map((c, i) => [c, i]).sort((a, b) => first(a[0]) - first(b[0]) || a[1] - b[1]).map((x) => x[0]);
+    }
+    for (const c of ordered) {
+      const resumeRoot = isRippling() && c.file_role === "resume" ? relocate(c.cid) : null;
+      const res = await writeOne(c, files);
+      if (res) report.push(res);
+      if (resumeRoot && res && res.status === "attached") {
+        const parsed = await waitResumeParse(resumeRoot);
+        diag("rippling resume parse", parsed ? "re-mounted" : "no re-mount");
       }
+      // Yield a macrotask between controls. Each write ends in a blur that
+      // commits the field into the form's (Apollo/React) state asynchronously;
+      // writing many controls in one synchronous burst lets React batch those
+      // commits into a single render where shared form-state merges clobber each
+      // other, leaving some just-written fields reading as "missing required
+      // field". A real gap flushes each commit before the next write.
+      await new Promise((r2) => setTimeout(r2, gapMs));
     }
     return report;
   }

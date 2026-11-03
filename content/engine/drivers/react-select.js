@@ -243,7 +243,172 @@
     if (isAshbyValueCombo(root, input) && input && clean(input.value) && !comboIsExpanded(input)) {
       return true;
     }
+    if (isPlaceSearch(root, input)) return placeCommitted(input);
     return !!bareComboValue(root, input);
+  }
+
+  // ── Place search (Rippling Location, Google Places style) ─────────────────
+  // A bare text input whose suggestions only load from a search service after
+  // typing (2-5 s on Rippling). Picking a suggestion rewrites the input to the
+  // place's full name ("Austin, TX, USA") and fills a hidden place-id input; a
+  // typed value that was never picked is rejected as "required" on submit.
+  const US_STATES = {
+    al: "alabama", ak: "alaska", az: "arizona", ar: "arkansas", ca: "california", co: "colorado",
+    ct: "connecticut", de: "delaware", dc: "district of columbia", fl: "florida", ga: "georgia",
+    hi: "hawaii", id: "idaho", il: "illinois", in: "indiana", ia: "iowa", ks: "kansas", ky: "kentucky",
+    la: "louisiana", me: "maine", md: "maryland", ma: "massachusetts", mi: "michigan", mn: "minnesota",
+    ms: "mississippi", mo: "missouri", mt: "montana", ne: "nebraska", nv: "nevada", nh: "new hampshire",
+    nj: "new jersey", nm: "new mexico", ny: "new york", nc: "north carolina", nd: "north dakota",
+    oh: "ohio", ok: "oklahoma", or: "oregon", pa: "pennsylvania", ri: "rhode island", sc: "south carolina",
+    sd: "south dakota", tn: "tennessee", tx: "texas", ut: "utah", vt: "vermont", va: "virginia",
+    wa: "washington", wv: "west virginia", wi: "wisconsin", wy: "wyoming",
+  };
+  const US_NAMES = new Set(["us", "usa", "u s a", "united states", "united states of america"]);
+  const PLACE_LABEL_RE = /\b(location|city|town|address|where .{0,20}(based|located|live))\b/i;
+
+  function placeIdInput(input) {
+    // Rippling keeps it in the next field block ([data-testid=externalPlaceId]),
+    // so look outward and take the nearest one.
+    let el = input && input.parentElement;
+    for (let i = 0; el && i < 8; i++, el = el.parentElement) {
+      for (const hit of el.querySelectorAll ? el.querySelectorAll('input[type="hidden"]') : []) {
+        const tag = `${hit.name || ""} ${hit.id || ""} ${hit.getAttribute("data-testid") || ""} ${hit.getAttribute("data-input") || ""}`;
+        if (/place/i.test(tag)) return hit;
+      }
+    }
+    return null;
+  }
+
+  // Only a bare input (no react-select control around it) that searches as you type.
+  function isPlaceSearch(root, input) {
+    if (!input || root !== input || input.tagName !== "INPUT" || isDummyInput(input)) return false;
+    if (isAshbyValueCombo(root, input)) return false;
+    if (AF.lever && AF.lever.isAutocompleteInput && AF.lever.isAutocompleteInput(input)) return false; // lever.js owns it
+    if (input.getAttribute("aria-autocomplete") !== "list") return false;
+    if (placeIdInput(input)) return true;
+    return PLACE_LABEL_RE.test(AF.dom.labelForControl(input) || "");
+  }
+
+  function placeCommitted(input) {
+    if (!input || !clean(input.value) || comboIsExpanded(input)) return false;
+    const pid = placeIdInput(input);
+    return pid ? !!clean(pid.value) : true;
+  }
+
+  // "Austin, TX, USA" -> { city: "austin", region: "texas", country: "united states" }
+  function placeParts(text) {
+    const segs = String(text || "")
+      .split(",")
+      .map((s) => normText(s))
+      .filter(Boolean);
+    const out = { city: segs[0] || "", region: "", country: "" };
+    for (const s of segs.slice(1)) {
+      if (US_NAMES.has(s.replace(/\./g, " ").replace(/\s+/g, " ").trim())) out.country = "united states";
+      else if (!out.region && (US_STATES[s] || Object.values(US_STATES).includes(s))) out.region = US_STATES[s] || s;
+      else if (!out.region && segs.length > 2) out.region = s;
+      else out.country = out.country || s;
+    }
+    if (out.region && !out.country && Object.values(US_STATES).includes(out.region)) out.country = "united states";
+    return out;
+  }
+
+  // Best suggestion for the wanted place: same city first, then region, then country.
+  // Search services rank well, so ties keep the service's order.
+  function bestPlaceOption(nodes, want) {
+    const w = placeParts(want);
+    if (!w.city) return null;
+    let best = null;
+    let bestScore = 0;
+    for (const o of nodes) {
+      const g = placeParts(clean(o.innerText || o.textContent));
+      if (g.city !== w.city) continue;
+      let score = 4;
+      if (w.region) score += g.region === w.region ? 2 : g.region ? -2 : 0;
+      if (w.country) score += g.country === w.country ? 1 : g.country ? -1 : 0;
+      if (score > bestScore) {
+        best = o;
+        bestScore = score;
+      }
+    }
+    return best;
+  }
+
+  // Queries to try: "City, State" first (Rippling's search finds nothing for
+  // "Austin, TX, USA"), then the full text, then the city alone.
+  function placeQueries(want) {
+    const segs = String(want || "")
+      .split(",")
+      .map((s) => clean(s))
+      .filter(Boolean);
+    const out = [segs.slice(0, 2).join(", "), segs.join(", ")];
+    if (segs.length > 1) out.push(segs[0]);
+    return [...new Set(out.filter(Boolean))];
+  }
+
+  async function writePlaceSearch(input, root, want) {
+    const w = placeParts(want);
+    if (placeCommitted(input) && placeParts(input.value).city === w.city) return true;
+    const typeFn = AF.dom.typeReactValue;
+    const clickFn = AF.dom.pageClick;
+    const typeQuery = async (query) => {
+      try {
+        input.focus({ preventScroll: true });
+      } catch {}
+      // Open the widget the way a click does, then clear and let the empty value
+      // settle so the search runs again even when the same text was already typed.
+      openCombo(input, root);
+      setNativeValue(input, "");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      await delay(400);
+      if (typeof typeFn === "function") typeFn(input, query);
+      else {
+        setNativeValue(input, query);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    };
+    // Results arrive asynchronously; wait for a suggestion naming the city.
+    const awaitOption = async (ms) => {
+      let opt = null;
+      await waitUntil(
+        () => {
+          const lb = comboListbox(input, root);
+          if (lb && lb.getAttribute("aria-busy") === "true") return null;
+          opt = bestPlaceOption(scopedOptionNodes(input, root), want);
+          return opt ? true : null;
+        },
+        ms,
+        120
+      );
+      return opt;
+    };
+    // Rippling's suggestions come from the Google Maps library, which loads on the
+    // first focus: text typed before it is ready never gets an answer, and the
+    // load can take 10 s. So "City, State" is typed again before the other forms.
+    const queries = placeQueries(want);
+    const plan = [queries[0], queries[0], ...queries.slice(1), queries[0]];
+    const started = Date.now();
+    for (const query of plan) {
+      if (Date.now() - started > 50000) break;
+      await typeQuery(query);
+      const opt = await awaitOption(7000);
+      diag(input, "place search", {
+        query,
+        ms: Date.now() - started,
+        options: scopedOptionNodes(input, root).length,
+        picked: opt && clean(opt.innerText),
+      });
+      if (!opt) continue;
+      if (typeof clickFn === "function") clickFn(opt);
+      else clickOption(opt);
+      if (await waitUntil(() => (placeCommitted(input) ? true : null), 3000, 80)) return true;
+    }
+    return placeCommitted(input) && placeParts(input.value).city === w.city;
+  }
+
+  function diag(input, msg, extra) {
+    try {
+      console.log("[autofill] combo", (input && input.id) || "", msg, extra || "");
+    } catch {}
   }
 
   // Input-less div[role=combobox] (Rippling): the committed option is the
@@ -265,6 +430,7 @@
     if (isAshbyValueCombo(root, input) && input && clean(input.value) && !comboIsExpanded(input)) {
       return clean(input.value);
     }
+    if (isPlaceSearch(root, input) && placeCommitted(input)) return clean(input.value);
     return bareComboValue(root, input);
   }
 
@@ -464,6 +630,9 @@
       if (mob && (await writeNativeSelect(mob, value))) return true;
       return comboHasSelection(root);
     }
+
+    // Rippling Location and other place searches: suggestions load after typing.
+    if (isPlaceSearch(root, input)) return writePlaceSearch(input, root, value);
 
     // Ashby value-combobox, live probe evidence (jobs.ashbyhq.com):
     // - Options live in aria-controls listbox (DIV._floatingContainer_d7ago_103).
@@ -692,6 +861,8 @@
       return comboHasSelection(root);
     },
     async harvestOptions(root) {
+      // A place search lists nothing until something is typed.
+      if (isPlaceSearch(root, comboInput(root))) return [];
       const opts = await harvestOptions(root);
       if (opts.length) return opts;
       const input = comboInput(root);
