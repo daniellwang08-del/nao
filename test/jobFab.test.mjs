@@ -17,6 +17,7 @@ const body = [
   grab("async function rememberJobTab(tabId, jobId) {"),
   grab("async function fabState(tabId) {"),
   grab("function expandJob(tabId, windowId, sendResponse) {"),
+  grab("async function repaintJobFab(tabId) {"),
 ].join("\n");
 
 function area(initial = {}) {
@@ -39,7 +40,7 @@ function area(initial = {}) {
 }
 
 function load({ session = {}, local = {}, panelOpens = true, consoleOpen = false } = {}) {
-  const calls = { order: [], messages: [], created: [] };
+  const calls = { order: [], messages: [], created: [], painted: [] };
   const chrome = {
     storage: { session: area(session), local: area(local) },
     sidePanel: {
@@ -50,7 +51,10 @@ function load({ session = {}, local = {}, panelOpens = true, consoleOpen = false
       },
     },
     runtime: { sendMessage: (m, cb) => { calls.messages.push(m); if (cb) cb(); }, lastError: null },
-    tabs: { create: async (t) => { calls.created.push(t.url); return { id: 99 }; } },
+    tabs: {
+      create: async (t) => { calls.created.push(t.url); return { id: 99 }; },
+      sendMessage: async (tabId, m) => { calls.painted.push([tabId, m]); },
+    },
   };
   const make = new Function(
     "chrome", "getBackendUrl", "isAutoApplyConsoleOpen",
@@ -58,7 +62,7 @@ function load({ session = {}, local = {}, panelOpens = true, consoleOpen = false
      const AA_HISTORY_KEY = "aaHistory"; const PENDING_JOB_KEY = "pendingWebappJob";
      const APPLY_TAB_MAX_AGE_MS = 6 * 60 * 60 * 1000;
      ${body}
-     return { jobForTab, rememberJobTab, fabState, expandJob };`,
+     return { jobForTab, rememberJobTab, fabState, expandJob, repaintJobFab };`,
   );
   const fns = make(chrome, async () => "https://nao.it.com", async () => consoleOpen);
   return { ...fns, chrome, calls };
@@ -118,4 +122,22 @@ test("a tab NAO no longer tracks gets a clear message", async () => {
   const res = await new Promise((resolve) => expandJob(5, 11, resolve));
   assert.equal(res.ok, false);
   assert.match(res.error, /no longer tracks/);
+});
+
+test("when auto-apply finishes, the button stops showing Filling and shows the outcome", async () => {
+  const { repaintJobFab, chrome, calls } = load({ session: { "aaTab:2": { jobId: "j2" } } });
+  await repaintJobFab(2);
+  assert.equal(calls.painted.at(-1)[1].state, "running");
+  // The run ends: the tab is no longer driven, it becomes a hand-off, history has the outcome.
+  await chrome.storage.session.remove("aaTab:2");
+  await chrome.storage.session.set({ "aaHandoff:2": { jobId: "j2" } });
+  await chrome.storage.local.set({ aaHistory: { j2: { status: "needs_you", message: "2 fields need you." } } });
+  await repaintJobFab(2);
+  assert.deepEqual(calls.painted.at(-1), [2, { type: "AA_FAB_STATUS", state: "needs", message: "2 fields need you." }]);
+});
+
+test("tabs without a job button are left alone", async () => {
+  const { repaintJobFab, calls } = load();
+  await repaintJobFab(5);
+  assert.equal(calls.painted.length, 0);
 });

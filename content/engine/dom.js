@@ -329,9 +329,26 @@
   // SmartRecruiters: the human label is a `label="First name"` attribute on the
   // spl-* shadow host wrapping the control (spl-input / spl-textarea /
   // spl-date-field / spl-autocomplete). Climb across shadow boundaries to it.
+  // Screening questions (salary, "why are you leaving", ...) carry no label
+  // attribute: the question is a light child <span slot="label-content"> of the
+  // spl-input / spl-textarea / spl-number-field host, as on the select and radio
+  // questions sr-select.js reads.
   function srLabel(inp) {
-    const host = climbHosts(inp, (n) => n.hasAttribute && n.hasAttribute("label") && clean(n.getAttribute("label")));
-    return host ? clean(host.getAttribute("label")) : "";
+    let text = "";
+    climbHosts(inp, (n) => {
+      if (n.hasAttribute && n.hasAttribute("label") && clean(n.getAttribute("label"))) {
+        text = clean(n.getAttribute("label"));
+        return true;
+      }
+      for (const c of n.children || []) {
+        if (c.getAttribute && c.getAttribute("slot") === "label-content" && clean(c.textContent)) {
+          text = clean(c.textContent).replace(/\s*\*$/, "");
+          return true;
+        }
+      }
+      return false;
+    });
+    return text;
   }
 
   function labelForControl(inp) {

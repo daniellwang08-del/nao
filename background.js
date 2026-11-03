@@ -614,6 +614,34 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
 });
 
+// The button paints its state once when it loads. When a run on its tab ends (the
+// "driven" key goes away, a hand-off or live state changes, or history records the
+// outcome), push the new state so it does not keep showing "Filling...".
+chrome.storage.onChanged.addListener((changes, area) => {
+  const tabIds = new Set();
+  if (area === "session") {
+    for (const key of Object.keys(changes)) {
+      for (const prefix of [AA_TAB_PREFIX, AA_HANDOFF_PREFIX, AA_FAB_PREFIX]) {
+        if (key.startsWith(prefix)) tabIds.add(Number(key.slice(prefix.length)));
+      }
+    }
+  } else if (area === "local" && changes[AA_HISTORY_KEY]) {
+    void chrome.tabs.query({}).then((tabs) => tabs.forEach((t) => t.id != null && void repaintJobFab(t.id))).catch(() => {});
+    return;
+  }
+  for (const tabId of tabIds) if (Number.isFinite(tabId)) void repaintJobFab(tabId);
+});
+
+async function repaintJobFab(tabId) {
+  try {
+    const s = await fabState(tabId);
+    if (!s.show) return;
+    await chrome.tabs.sendMessage(tabId, { type: "AA_FAB_STATUS", state: s.state, message: s.message || "" }, { frameId: 0 });
+  } catch {
+    /* no button on that tab */
+  }
+}
+
 /** What the corner button shows: a live fill, or how auto-apply left the job. */
 async function fabState(tabId) {
   const job = await jobForTab(tabId);
