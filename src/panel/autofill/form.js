@@ -56,21 +56,49 @@ const CHECK_TITLES = {
   hidden: "This job is hidden from your list",
 };
 
-/** Manual fills: ask before applying where the user already applied (NAO marks or their inbox). */
-async function confirmNotApplied() {
-  const job = state.job;
-  if (!job || !job.job_id) return true;
-  toast("Checking your applications and inbox…");
-  const check = await api
-    .applyCheck(job.job_id, { timezone: Intl.DateTimeFormat().resolvedOptions().timeZone })
-    .catch(() => null);
-  if (!check || check.ok !== false) return true;
+// While the inbox is still syncing, look again this often (and this many times).
+const RECHECK_MS = 15_000;
+const RECHECK_TIMES = 4;
+
+/**
+ * Manual fills: check NAO marks and the inbox alongside filling instead of
+ * before it. When the user already applied (to this job or at this company),
+ * a notice asks whether to stop or keep filling; the fill is never held up.
+ */
+export function checkAppliedAlongside(job = state.job, { retries = RECHECK_TIMES, recheckMs = RECHECK_MS } = {}) {
+  if (!job || !job.job_id) return Promise.resolve(null);
+  const jobId = job.job_id;
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const attempt = async (left) => {
+    const check = await api.applyCheck(jobId, { timezone, wait: false }).catch(() => null);
+    // The user moved on to another job meanwhile: say nothing.
+    if (!check || !state.job || state.job.job_id !== jobId) return check;
+    if (check.ok === false) {
+      await warnAlreadyApplied(job, check);
+      return check;
+    }
+    // New mail is still being read; the answer may change once it is in.
+    if (check.inbox_syncing && left > 0) {
+      await delay(recheckMs);
+      return attempt(left - 1);
+    }
+    return check;
+  };
+  return attempt(retries);
+}
+
+async function warnAlreadyApplied(job, check) {
   const which = [job.title, job.company].filter(Boolean).join(" at ");
-  return askConfirm({
+  const keep = await askConfirm({
     title: CHECK_TITLES[check.reason] || "Already applied",
-    message: `${which ? `${which}: ` : ""}${check.message || ""} Fill the application anyway?`,
-    confirmLabel: "Fill anyway",
+    message: `${which ? `${which}: ` : ""}${check.message || ""} Keep filling this application?`,
+    confirmLabel: "Continue",
+    cancelLabel: "Stop",
   });
+  if (keep) return;
+  setState({ modal: null });
+  await cancelAutofill();
+  toast("Stopped. You already applied here.");
 }
 
 /**
@@ -111,9 +139,7 @@ export async function startAutofill({ tab: targetTab = null, headless = false, r
     if (!granted) {
       return fail(headless ? "NAO does not have access to this site. Start auto-apply again to allow it." : "Permission to read this page was denied.");
     }
-    if (!headless && !reached && !(await confirmNotApplied())) {
-      return { ok: false, error: "Cancelled: already applied." };
-    }
+    if (!headless && !reached) void checkAppliedAlongside();
     // A description page: open the application first (JobDiva does its own).
     if (engine.mode !== "workday" && engine.platform !== "jobdiva" && !reached) {
       if (!headless) toast("Opening the application form…");

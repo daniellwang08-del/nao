@@ -139,7 +139,7 @@ export function Modal({ modal, onClose }) {
       <h2 id="modal-title" class="modal-title">${modal.title}</h2>
       ${modal.message ? html`<p class="modal-body">${modal.message}</p>` : null}
       <div class="modal-actions">
-        <${Button} variant="ghost" onClick=${onClose} disabled=${modal.busy}>Cancel</${Button}>
+        <${Button} variant="ghost" onClick=${onClose} disabled=${modal.busy}>${modal.cancelLabel || "Cancel"}</${Button}>
         <button ref=${confirmRef} type="button" class=${`btn btn-md btn-${modal.tone === "danger" ? "danger" : "primary"}`} disabled=${modal.busy} onClick=${modal.onConfirm}>
           ${modal.busy ? html`<${Spinner} size=${14} />` : null}<span>${modal.confirmLabel || "Confirm"}</span>
         </button>

@@ -258,15 +258,20 @@ async function loadQueue() {
   }
 }
 
-/** Applications found in the inbox hide those companies' jobs, so sync before reading the queue. */
-async function refreshInbox() {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    if (attempt === 0) log("info", "Checking your inbox for applications you already sent...");
-    const res = await api.refreshInbox(localTimezone()).catch(() => null);
-    if (!res || !res.connected || res.fresh) return;
-    if (store.phase !== "running") return;
-  }
-  log("warn", "Your inbox is still syncing. Each job is checked against it again right before applying.");
+/**
+ * Bring the inbox up to date without holding the run: jobs were already
+ * checked against it before they were scored, the sync only reads mail newer
+ * than the last one, and each job is checked again when it is reached.
+ */
+function refreshInboxInBackground() {
+  api
+    .refreshInbox(localTimezone())
+    .then((res) => {
+      if (res && res.connected && !res.fresh) {
+        log("info", "Your inbox is still syncing. Each job is checked against it again before submitting.");
+      }
+    })
+    .catch(() => {});
 }
 
 function pump() {
@@ -544,8 +549,7 @@ async function start() {
   } catch {
     set({ windowId: null });
   }
-  await refreshInbox();
-  if (store.phase !== "running") return;
+  refreshInboxInBackground();
   await loadQueue();
   if (!queueOf(store).length && !Object.keys(store.runs).length) {
     set({ phase: "idle" });

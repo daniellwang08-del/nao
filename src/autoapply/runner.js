@@ -39,6 +39,8 @@ function delay(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+const localTz = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
+
 function report(patch) {
   if (console_) console_.update(jobId, patch);
 }
@@ -336,8 +338,10 @@ async function run(cfg) {
   report({ title: job.title, company: job.company });
   if (job.applied) throw skipped("Already marked applied.");
   step("Checking your applications and inbox…");
-  const prior = await api.applyCheck(jobId, { timezone: Intl.DateTimeFormat().resolvedOptions().timeZone });
+  // Fast: answers from what is synced; a stale inbox catches up in the background.
+  const prior = await api.applyCheck(jobId, { timezone: localTz(), wait: false });
   if (prior && prior.ok === false) throw skipped(prior.message || "You already applied here.");
+  let inboxSyncing = Boolean(prior && prior.inbox_syncing);
   if (!job.url) throw skipped("This job has no application link.");
   if (!docsComplete(job.docs)) throw skipped("Resume or cover letter is not built yet.");
 
@@ -407,6 +411,12 @@ async function run(cfg) {
     throw needsYou("Filled. Auto-submit is off for this site, so review and submit it.");
   }
 
+  if (inboxSyncing) {
+    // The inbox was still syncing when this job started: look once more before sending.
+    const again = await api.applyCheck(jobId, { timezone: localTz(), wait: false }).catch(() => null);
+    if (again && again.ok === false) throw skipped(again.message || "You already applied here.");
+    inboxSyncing = false;
+  }
   const via = await submitAndConfirm(tab, job);
   step("Marking applied…");
   await api.markApplied([jobId]);

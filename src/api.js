@@ -264,12 +264,17 @@ export const getVerificationCode = ({ since, company, exclude } = {}) =>
     { timeoutMs: 60_000 }
   );
 
-/** Before applying: { ok, reason, message, prior, inbox }. Syncs a stale inbox first, so it can take ~40s. */
-export const applyCheck = (jobId, { timezone, syncInbox = true } = {}) =>
+/**
+ * Before applying: { ok, reason, message, prior, inbox, inbox_syncing, checked_at }.
+ * `wait: false` answers at once from the applications already synced and brings a
+ * stale inbox up to date in the background (`inbox_syncing`: ask again later).
+ * `wait: true` syncs a stale inbox first, so it can take ~40s.
+ */
+export const applyCheck = (jobId, { timezone, syncInbox = true, wait = true } = {}) =>
   apiFetch(`/assistant/jobs/${encodeURIComponent(jobId)}/apply-check`, {
     method: "POST",
-    body: { sync_inbox: syncInbox, timezone },
-    timeoutMs: 58_000,
+    body: { sync_inbox: syncInbox, wait_for_inbox: wait, timezone },
+    timeoutMs: wait ? 58_000 : 20_000,
   });
 
 /** Syncs the inbox when stale: { connected, fresh, last_synced_at }. */
