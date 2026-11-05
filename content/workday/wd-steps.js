@@ -1433,33 +1433,68 @@
   // so Education 2 with the same school reuses Education 1's answer.
   const searchPicks = new Map();
 
-  // Which search-result row answers `want`? Returns { row } when decided,
-  // { ambiguous: [texts] } when several rows are equally plausible (e.g. the
-  // Bothell / Seattle / Tacoma campuses for "University of Washington"), or {}
-  // when nothing is related. Never falls back to "shortest substring" or the
-  // highlighted row: those committed "University of Mary Washington" and the
-  // Tacoma campus for a plain "University of Washington" profile.
-  function searchResultTarget(want, root) {
-    const w = D.norm(want);
-    const rows = promptResultOptions(root)
-      .map((o) => ({ o, t: D.norm(o.textContent) }))
-      .filter((x) => x.t);
-    if (!rows.length || !w) return {};
-    const exact = rows.find((x) => x.t === w);
-    if (exact) return { row: exact.o };
-    const picked = searchPicks.get(w);
-    const prior = picked && rows.find((x) => x.t === D.norm(picked));
-    if (prior) return { row: prior.o };
-    const related = rows.filter(
-      (x) => containsWordStart(x.t, w) || (x.t.includes(" ") && x.t.length * 2 >= w.length && containsWordStart(w, x.t)),
-    );
-    if (related.length === 1) return { row: related[0].o };
-    if (related.length > 1) {
-      return { ambiguous: related.map((x) => x.o.textContent.replace(/\s+/g, " ").trim()), rows: related };
+  // ── Ranking search results (School, Field of Study, other server search prompts) ──
+  //
+  // Live proof (Epiq Systems tenant, 2026-11-05): "University of Washington" returns 19 results and
+  // the right one is "The University of Washington" (7th, not first); the old exact-text rule missed
+  // it because of the leading "The" and sent it to the ambiguous path beside the Foster School of
+  // Business. "Computer Science" has no option of its own there; the best is "Computer and
+  // Information Science", which no substring rule accepts, so the old code tried the next hard-coded
+  // field ("Computer Engineering", a different field). Rank every result by its words instead.
+  const SEARCH_STOPWORDS = new Set(["the", "of", "and", "in", "at", "for", "a", "an", "to", "on"]);
+
+  // Comparable text: lowercase, "&" as "and", no punctuation, no leading "The".
+  function canonOption(text) {
+    return String(text || "")
+      .toLowerCase()
+      .replace(/&/g, " and ")
+      .replace(/[^\p{L}\p{N}]+/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/^the /, "");
+  }
+
+  function searchTokens(text) {
+    return canonOption(text)
+      .split(" ")
+      .filter((t) => t && !SEARCH_STOPWORDS.has(t));
+  }
+
+  // Score each result against what the profile says. Returns ranked [{ text, score, coverage, extra }]
+  // plus `best` when one result clearly answers it (exact after canonOption, or the only full match
+  // with no close rival). `best` is null when the choice needs the profile-aware picker.
+  function rankSearchResults(want, texts) {
+    const w = canonOption(want);
+    const wt = searchTokens(want);
+    const seen = new Set();
+    const items = [];
+    for (const raw of texts || []) {
+      const text = String(raw || "").replace(/\s+/g, " ").trim();
+      const c = canonOption(text);
+      if (!c || seen.has(c) || isEmptyPromptRow(text) || isPlaceholderOption(text)) continue;
+      seen.add(c);
+      const ot = searchTokens(text);
+      const hits = wt.filter((t) => ot.includes(t)).length;
+      const coverage = wt.length ? hits / wt.length : 0;
+      const extra = ot.filter((t) => !wt.includes(t)).length;
+      const phrase = w && containsWordStart(c, w);
+      items.push({ text, canon: c, coverage, extra, phrase, score: coverage * 100 - extra * 5 + (phrase ? 10 : 0) });
     }
-    // A lone result for an acronym ("MIT", "UCLA") is the server's own match.
-    if (rows.length === 1 && /^[a-z&.]{2,8}$/.test(w)) return { row: rows[0].o };
-    return {};
+    items.sort((a, b) => b.score - a.score || a.text.length - b.text.length);
+    const exact = items.find((x) => x.canon === w);
+    if (exact) return { best: exact.text, ranked: items, exact: true };
+    const top = items[0];
+    if (!top || top.coverage < 0.5) return { best: null, ranked: items.filter((x) => x.coverage >= 0.5) };
+    const second = items[1];
+    const decisive = top.coverage === 1 && (!second || second.coverage < 1 || second.score <= top.score - 10);
+    return { best: decisive ? top.text : null, ranked: items.filter((x) => x.coverage >= 0.5) };
+  }
+
+  // Shorter search text for a prompt whose full-text search found nothing ("Computer Science" ->
+  // "Computer"), so there is a list to rank against the profile's wording.
+  function broaderSearchQuery(value) {
+    const t = searchTokens(value);
+    return t.length > 1 ? t[0] : null;
   }
 
   // The profile currently being filled. chooseSchoolResult reads address.city
@@ -3112,147 +3147,239 @@
     return false;
   }
 
-  // True once a currently-visible option's text matches `want` (either direction),
-  // i.e. the server-backed list has FINISHED filtering to our query. Polls so we
-  // never press Enter against a stale, unfiltered list. Ignores the empty-state
-  // "No Items" row (seen on School prompts while the server search is in flight).
-  async function waitForFilteredOption(want, ms) {
-    const w = D.norm(want);
+  // Result rows of THIS prompt's open list that share a word with the search text. Rows that
+  // share nothing are a default list the prompt shows before any search ran.
+  function relatedPromptRows(multi, value) {
+    const wt = searchTokens(value);
+    return readMultiOptionRows(activeMultiListRoot(multi)).filter((r) => {
+      const ot = searchTokens(r.text);
+      return wt.some((t) => ot.includes(t));
+    });
+  }
+
+  // Wait until this prompt shows search results for `value` (count stable), or time out.
+  async function waitForPromptResults(multi, value, ms) {
     const end = Date.now() + ms;
+    let last = -1;
+    let stableSince = 0;
     while (Date.now() < end) {
-      // promptResultOptions excludes committed pills (which embed their own
-      // promptOption node) and the transient "No Items" row.
-      const hit = promptResultOptions().some((o) => {
-        const t = D.norm(o.textContent);
-        return t === w || t.includes(w) || w.includes(t);
-      });
-      if (hit) return true;
-      await D.delay(120);
+      throwIfAborted();
+      const n = relatedPromptRows(multi, value).length;
+      if (n > 0) {
+        if (n === last) {
+          if (!stableSince) stableSince = Date.now();
+          if (Date.now() - stableSince >= 300) return true;
+        } else {
+          last = n;
+          stableSince = Date.now();
+        }
+      } else {
+        last = n;
+        stableSince = 0;
+      }
+      await D.delay(100);
     }
-    return false;
+    return relatedPromptRows(multi, value).length > 0;
+  }
+
+  // Bring a result row into the (possibly virtualized) list and return it.
+  async function revealPromptRow(multi, text) {
+    const n = D.norm(text);
+    const find = () => readMultiOptionRows(activeMultiListRoot(multi)).find((r) => D.norm(r.text) === n);
+    let row = find();
+    if (row) return row.el;
+    const scroller = multiListScroller(multi);
+    if (!scroller) return null;
+    scroller.scrollTop = 0;
+    scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+    await D.delay(80);
+    for (let i = 0; i < 60; i++) {
+      row = find();
+      if (row) return row.el;
+      const max = Math.max(0, (scroller.scrollHeight || 0) - (scroller.clientHeight || 0));
+      if ((scroller.scrollTop || 0) >= max - 1) break;
+      scroller.scrollTop = Math.min(max, (scroller.scrollTop || 0) + Math.max(40, (scroller.clientHeight || 120) * 0.7));
+      scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+      await D.delay(90);
+    }
+    row = find();
+    return row ? row.el : null;
+  }
+
+  // Commit one result row of an open search prompt. The first (highlighted) row commits on Enter
+  // with the search text still typed; any other row is clicked the way Canvas rows need it
+  // (leaf, row, option text, radio). Last resort: arrow down to it and press Enter.
+  async function commitPromptRow(multi, input, target, isChosen) {
+    const n = D.norm(target);
+    const rows = readMultiOptionRows(activeMultiListRoot(multi));
+    if (rows.length && D.norm(rows[0].text) === n) {
+      input.focus();
+      pressEnter(input);
+      await D.delay(450);
+      if (isChosen()) return true;
+    }
+    const el = await revealPromptRow(multi, target);
+    if (el && el.isConnected) {
+      try {
+        el.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+      } catch {}
+      await clickMultiOptionRow(el);
+      const end = Date.now() + 1200;
+      while (Date.now() < end) {
+        if (isChosen()) return true;
+        await D.delay(100);
+      }
+    }
+    if (isChosen()) return true;
+    // Keyboard: move the highlight to the target, then Enter.
+    input.focus();
+    for (let i = 0; i < 40; i++) {
+      const active = document.getElementById(input.getAttribute("aria-activedescendant") || "");
+      const activeText = active && optionTextClean(active.querySelector('[data-automation-id="promptOption"]') || active);
+      if (activeText && D.norm(activeText) === n) {
+        pressEnter(input);
+        await D.delay(450);
+        return isChosen();
+      }
+      pressKey(input, "ArrowDown", "ArrowDown", 40);
+      await D.delay(60);
+    }
+    return isChosen();
+  }
+
+  // Remove a chip Workday committed on its own (a lone search result that is a different field).
+  async function removePromptSelections(multi) {
+    for (const sel of promptSelectionNodes(multi)) {
+      const del = sel.querySelector(
+        '[data-automation-id="DELETE_charm"], [data-automation-id*="delete" i], [aria-label^="Delete" i], [aria-label^="Remove" i], [data-automation-id="charm"]',
+      );
+      if (del) {
+        firePointerClick(del);
+        await D.delay(250);
+      }
+    }
+    return !promptChosen(multi, "");
+  }
+
+  // Type the search text and get results for it. Some tenants search as you type; others (the
+  // Epiq Systems School and Field of Study prompts) only search when Enter is pressed, and a
+  // search with one result commits it straight away. Returns "committed" | "results" | "none".
+  async function runPromptSearch(multi, input, opener, query) {
+    D.clickEl(opener);
+    await D.delay(220);
+    input.focus();
+    await D.delay(120);
+    D.nativeSet(input, "");
+    input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
+    await D.delay(60);
+    D.nativeSet(input, String(query));
+    input.dispatchEvent(new InputEvent("input", { bubbles: true, data: String(query), inputType: "insertText" }));
+    const last = String(query).slice(-1) || "a";
+    pressKey(input, last, "Key" + last.toUpperCase(), last.toUpperCase().charCodeAt(0));
+    // Search-as-you-type tenants show results here. Pressing Enter now would commit the first row.
+    if (await waitForPromptResults(multi, query, 1500)) return "results";
+    if (promptChosen(multi, "")) return "committed";
+    // Search-on-Enter tenants: Enter runs the search with the text still typed.
+    input.focus();
+    pressEnter(input);
+    await D.delay(500);
+    if (promptChosen(multi, "")) return "committed";
+    if (await waitForPromptResults(multi, query, 6000)) return "results";
+    return promptChosen(multi, "") ? "committed" : "none";
   }
 
   // School / Field of Study / other LARGE server-backed search prompts.
   //
-  // Proven on-tenant (School "University of Wollongong", live screenshots):
-  //   1. Type the school name and KEEP it in the input.
-  //   2. WAIT until "Search Results (N)" appears (list may briefly show "No Items").
-  //   3. Press Enter WHILE the typed text is still present, that commits a unique
-  //      match, or highlights the best of N>1 matches.
-  //   4. Decide the target row FIRST (searchResultTarget). Enter only when the
-  //      target is the first (highlighted) row; otherwise pointer-click it.
-  //      "University of Washington" returns "University of Mary Washington"
-  //      first, and a blind Enter committed it (issue #20). Several campuses
-  //      ("...-Seattle Campus", "...-Tacoma Campus") go to opts.choose (LLM)
-  //      once; the answer is cached for later entries with the same school.
-  //
-  // Anti-pattern that FAILED on this tenant: Enter before matches appear, or
-  // clearing the input after matches appear then pressing Enter on an empty
-  // "Search" placeholder, leaves Search Results open with no selection (and
-  // that open prompt then poisons Degree openAndPick for the same panel).
+  //   1. Type the profile's wording; get results (as-you-type, or Enter on search-on-Enter tenants).
+  //      One result: Workday commits it on Enter.
+  //   2. Several results: read them ALL (the list is virtualized), rank them against the profile
+  //      (rankSearchResults). A clear best wins; otherwise opts.choose (the profile-aware picker:
+  //      campus near the candidate, the field closest to their degree) decides once, and the answer
+  //      is cached so Education 2 with the same school reuses it.
+  //   3. Nothing found for the full text and opts.broaden: search a shorter query ("Computer") and
+  //      rank those results against the full wording.
+  //   4. Commit the chosen row (Enter when it is first, else click it, else arrow keys + Enter).
   async function fillSearchPrompt(multi, value, opts) {
     const want = D.norm(value);
     const choose = opts && opts.choose;
     let target = null;
-    const isChosen = () =>
-      target ? promptChosen(multi, D.norm(target)) : promptChosen(multi, want);
+    const isChosen = () => (target ? promptChosen(multi, D.norm(target)) : promptChosen(multi, want));
     if (promptChosen(multi, want)) return true;
     const input = multi.querySelector("input");
     if (!input) return false;
     const opener = multi.querySelector('[data-automation-id="multiselectInputContainer"]') || input;
-    let asked = false;
+    const queries = [String(value)];
+    const broader = opts && opts.broaden ? broaderSearchQuery(value) : null;
+    if (broader) queries.push(broader);
 
-    for (let attempt = 0; attempt < 2; attempt++) {
-      // 1. Open ONCE. Never click the opener/input again after this, a click on
-      //    an already-open prompt re-runs it and drops the highlighted row (that
-      //    is what produced the "input cleared, Search Results still open" state).
-      D.clickEl(opener);
-      await D.delay(220);
-      input.focus();
-      await D.delay(120);
-
-      // 2. Type the value ONCE. This is the ONLY place the search box is written.
-      D.nativeSet(input, "");
-      input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
-      await D.delay(60);
-      D.nativeSet(input, String(value));
-      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: String(value), inputType: "insertText" }));
-      const last = String(value).slice(-1) || "a";
-      pressKey(input, last, "Key" + last.toUpperCase(), last.toUpperCase().charCodeAt(0));
-
-      // 3. WAIT for genuine server results (skips "No Items" and committed pills)
-      //    with the typed text untouched. Never Enter against a stale list.
-      await waitForFilteredOption(value, 5000);
-      await D.delay(220);
-
-      // 4. Pick the row before committing anything.
-      let pick = searchResultTarget(value);
-      if (pick.ambiguous && !asked) {
-        asked = true;
-        await closePrompt(multi, input);
-        let answer = null;
-        try {
-          answer = choose ? await choose(value, pick.ambiguous) : null;
-        } catch (e) {
-          if (e && e.name === "WDAborted") throw e;
+    for (const query of queries) {
+      let asked = false;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        throwIfAborted();
+        const state = await runPromptSearch(multi, input, opener, query);
+        if (state === "committed") {
+          // Workday committed the only result. Keep it only when it answers the profile.
+          const chosen = promptSelectionNodes(multi)
+            .map((el) => (el.textContent || "").replace(/\s+/g, " ").trim())
+            .find(Boolean) || "";
+          const acronym = query === String(value) && /^[A-Za-z&.]{2,8}$/.test(String(value).trim());
+          const ok = !chosen || acronym || rankSearchResults(value, [chosen]).ranked.some((x) => x.coverage === 1);
+          if (!ok) await removePromptSelections(multi);
+          try {
+            WD.log(`search prompt '${value}' (query '${query}'): only result committed: ${JSON.stringify(chosen)}${ok ? "" : " (does not match the profile)"}`);
+          } catch {}
+          await closePrompt(multi, input);
+          if (ok) return true;
+          return false;
         }
-        const n = D.norm(answer);
-        const hit = n && pick.ambiguous.find((t) => D.norm(t) === n || containsWordStart(D.norm(t), n));
-        const nearby = pickNearbyCampus(value, pick.ambiguous, (activeProfile && activeProfile.address) || {});
-        searchPicks.set(want, hit || nearby || pick.ambiguous[0]);
-        try {
-          WD.log(`search prompt '${value}': ${pick.ambiguous.length} matches, chose ${JSON.stringify(hit || pick.ambiguous[0])} (llm=${JSON.stringify(answer)})`);
-        } catch {}
-        attempt--;
-        continue;
-      }
-      if (pick.ambiguous) {
-        const nearby = pickNearbyCampus(value, pick.ambiguous, (activeProfile && activeProfile.address) || {});
-        const row =
-          (nearby && pick.rows.find((x) => D.norm(x.o.textContent) === D.norm(nearby))) || pick.rows[0];
-        pick = { row: row.o };
-      }
-      const match = pick.row || null;
-      if (!match) {
-        try {
-          WD.warn(`search prompt '${value}': no matching result among ${promptResultOptions().length} rows, left for the user`);
-        } catch {}
-        await closePrompt(multi, input);
-        return false;
-      }
-      target = match.textContent.replace(/\s+/g, " ").trim();
+        if (state === "none") break; // try the broader query, if any
 
-      // 5. The target is the highlighted first row: Enter commits it with the
-      //    typed text still present (proven on-tenant).
-      if (promptResultOptions()[0] === match) {
-        input.focus();
-        pressEnter(input);
-        await D.delay(500);
-      }
-      if (isChosen()) {
-        await closePrompt(multi, input);
-        return true;
-      }
-
-      // 6. Pointer-click the target row (full pointer sequence, plain click
-      //    events are ignored by Canvas prompt rows).
-      if (match.isConnected) {
-        firePointerClick(match);
-        await D.delay(320);
-        if (!isChosen()) {
-          const box = match.querySelector('input[type="radio"], input[type="checkbox"]');
-          if (box) {
-            firePointerClick(box);
-            await D.delay(320);
+        const rows = multiListNeedsScroll(multi)
+          ? await scrollCollectMultiOptions(multi)
+          : readMultiOptionRows(activeMultiListRoot(multi));
+        const texts = rows.map((r) => r.text);
+        const ranking = rankSearchResults(value, texts);
+        let pickText = ranking.best;
+        const cached = searchPicks.get(want);
+        if (!pickText && cached && texts.some((t) => D.norm(t) === D.norm(cached))) pickText = cached;
+        if (!pickText && ranking.ranked.length) {
+          const options = ranking.ranked.map((x) => x.text);
+          if (choose && !asked) {
+            asked = true;
+            await closePrompt(multi, input);
+            let answer = null;
+            try {
+              answer = await choose(value, options);
+            } catch (e) {
+              if (e && e.name === "WDAborted") throw e;
+            }
+            const a = D.norm(answer);
+            const hit = a && options.find((t) => D.norm(t) === a || containsWordStart(D.norm(t), a));
+            searchPicks.set(want, hit || options[0]);
+            try {
+              WD.log(`search prompt '${value}': ${texts.length} results, ${options.length} candidates ${JSON.stringify(options.slice(0, 8))}, chose ${JSON.stringify(hit || options[0])} (picker=${JSON.stringify(answer)})`);
+            } catch {}
+            attempt--; // reopen, search again, commit the cached choice (does not count as an attempt)
+            continue;
           }
+          pickText = options[0];
         }
-      }
-      if (isChosen()) {
+        if (!pickText) {
+          try {
+            WD.warn(`search prompt '${value}' (query '${query}'): none of ${texts.length} results match ${JSON.stringify(texts.slice(0, 8))}`);
+          } catch {}
+          await closePrompt(multi, input);
+          break;
+        }
+        target = pickText;
+        try {
+          WD.log(`search prompt '${value}': ${texts.length} results, committing ${JSON.stringify(target)}`);
+        } catch {}
+        const ok = await commitPromptRow(multi, input, target, isChosen);
         await closePrompt(multi, input);
-        return true;
+        if (ok || isChosen()) return true;
+        await D.delay(250);
       }
-      await closePrompt(multi, input);
-      await D.delay(250);
     }
     return isChosen();
   }
@@ -5911,17 +6038,37 @@
       if (out.some((x) => D.norm(x) === D.norm(t))) return;
       out.push(t);
     };
+    // Only the profile's own field (and alternates the backend derived from it). Never a list of
+    // other fields: "Computer Engineering" was committed for a "Computer Science" profile.
     push(entry && entry.fieldOfStudy);
-    const alts = (entry && entry.fieldOfStudyFallbacks) || [];
-    for (const a of alts) push(a);
-    const primary = String((entry && entry.fieldOfStudy) || "");
-    if (/computer|software|electrical|ece|cse/i.test(primary)) {
-      push("Computer Science");
-      push("Computer Engineering");
-      push("Software Engineering");
-      push("Information Technology");
-    }
+    for (const a of (entry && entry.fieldOfStudyFallbacks) || []) push(a);
     return out;
+  }
+
+  // Several Field of Study results fit the profile's wording: the profile-aware picker chooses
+  // the one closest to the candidate's degree and field.
+  function makeFieldOfStudyChooser(entry) {
+    return async (field, options) => {
+      const cid = "wd-fos-" + D.norm(field).replace(/[^a-z0-9]+/g, "-");
+      const degree = String((entry && entry.degree) || "").trim();
+      const values = await requestOptionMatches([
+        {
+          cid,
+          key: "fieldOfStudy",
+          label:
+            "Field of Study. Pick the result that is the same field as the candidate's " +
+            JSON.stringify(field) +
+            (degree ? " (degree: " + degree + ")" : "") +
+            ". Prefer the option naming that field; never a different field.",
+          want: field,
+          kind: "select",
+          required: false,
+          options,
+        },
+      ]);
+      const v = values && values[cid];
+      return Array.isArray(v) ? v[0] : v || null;
+    };
   }
 
   // Several School results all name the profile's school (campuses of one
@@ -5953,9 +6100,9 @@
     return Array.isArray(v) ? v[0] : v || null;
   }
 
-  async function fillSearchPromptAny(multi, candidates) {
+  async function fillSearchPromptAny(multi, candidates, opts) {
     for (const value of candidates) {
-      if (await fillSearchPrompt(multi, value)) return true;
+      if (await fillSearchPrompt(multi, value, opts)) return true;
     }
     return false;
   }
@@ -5998,7 +6145,11 @@
         if (promptChosen(fosMulti, "")) {
           record(rep, `Edu ${n} Field of Study`, true);
         } else {
-          record(rep, `Edu ${n} Field of Study`, await fillSearchPromptAny(fosMulti, fosCandidates));
+          record(
+            rep,
+            `Edu ${n} Field of Study`,
+            await fillSearchPromptAny(fosMulti, fosCandidates, { choose: makeFieldOfStudyChooser(entry), broaden: true }),
+          );
         }
       }
     }
