@@ -1466,11 +1466,22 @@
     return (texts || []).find((t) => canonOption(t) === w) || null;
   }
 
-  // Shorter search text for a prompt whose full-text search found nothing ("Computer Science" ->
-  // "Computer"), so the picker has a list to choose from.
-  function broaderSearchQuery(value) {
-    const t = searchTokens(value);
-    return t.length > 1 ? t[0] : null;
+  // Words that name a broad area rather than the field itself; searched after the specific words.
+  const GENERIC_FIELD_WORDS = new Set([
+    "science", "sciences", "studies", "study", "engineering", "technology", "technologies", "management",
+    "arts", "art", "general", "applied", "systems", "system", "administration", "program", "degree",
+  ]);
+
+  // Shorter searches for a prompt whose full-text search had no usable result: each meaningful word
+  // of the profile's text, most specific first ("Science of Cybersecurity" -> "Cybersecurity", then
+  // "Science"), at most three, so the picker can still find the most relevant option.
+  function broaderSearchQueries(value) {
+    const seen = new Set();
+    const words = searchTokens(value).filter((t) => t.length >= 3 && !seen.has(t) && seen.add(t));
+    if (words.length < 2 && !(words.length === 1 && canonOption(value) !== words[0])) return [];
+    const specific = words.filter((t) => !GENERIC_FIELD_WORDS.has(t)).sort((a, b) => b.length - a.length);
+    const generic = words.filter((t) => GENERIC_FIELD_WORDS.has(t));
+    return [...specific, ...generic].slice(0, 3);
   }
 
   // The profile currently being filled; the School picker tells the AI the candidate's home city
@@ -3225,8 +3236,10 @@
   //      profile's text is taken; otherwise opts.choose (the AI picker, given every result and the
   //      education entry) chooses. Its answer is cached for this search and result list, so a second
   //      education with the same school reuses it. No answer: leave the field for the user; never guess.
-  //   4. Nothing for the full text and opts.broaden: search a shorter query ("Computer"); whatever
-  //      it returns, even a single result, goes through the picker (it may be a different field).
+  //   4. opts.broaden (Field of Study): when the full text has no result the picker accepts, search
+  //      each meaningful word, most specific first ("Cybersecurity", then "Science"); whatever a
+  //      shorter search returns, even a single result, goes through the picker, which takes the most
+  //      relevant option. The first search with a relevant result wins.
   //   5. Commit the chosen row (Enter when it is first, else click it, else arrow keys + Enter).
   async function fillSearchPrompt(multi, value, opts) {
     const want = D.norm(value);
@@ -3238,8 +3251,9 @@
     if (!input) return false;
     const opener = multi.querySelector('[data-automation-id="multiselectInputContainer"]') || input;
     const queries = [String(value)];
-    const broader = opts && opts.broaden ? broaderSearchQuery(value) : null;
-    if (broader) queries.push(broader);
+    if (opts && opts.broaden) {
+      for (const q of broaderSearchQueries(value)) if (D.norm(q) !== want) queries.push(q);
+    }
     const chipText = () =>
       promptSelectionNodes(multi)
         .map((el) => (el.textContent || "").replace(/\s+/g, " ").trim())
@@ -3280,10 +3294,12 @@
           await closePrompt(multi, input);
           const ok = chosen && (await ask([chosen]));
           if (ok) return true;
-          await removePromptSelections(multi);
+          const removed = await removePromptSelections(multi);
           try {
-            WD.log(`search prompt '${value}': lone result ${JSON.stringify(chosen)} for '${query}' is not it, removed`);
+            WD.log(`search prompt '${value}': lone result ${JSON.stringify(chosen)} for '${query}' is not it, ${removed ? "removed" : "could NOT be removed"}`);
           } catch {}
+          // A chip that stayed would read as "filled" on the next search: stop and leave it to the user.
+          if (!removed) return false;
           break;
         }
         if (state === "none") break; // try the broader query, if any
@@ -5994,8 +6010,9 @@
     return out;
   }
 
-  // Several Field of Study results: the AI picks the one that is the candidate's field (the
-  // closest name for the same field), or none when every result is a different field.
+  // Field of Study results: the AI picks the most relevant option for the candidate's field: the same
+  // field when listed, else the closest related field. None only when no result is related at all
+  // (then the next, shorter search is tried).
   function makeFieldOfStudyChooser(entry) {
     return (field, options) =>
       pickOne(
@@ -6005,7 +6022,7 @@
           JSON.stringify(field) +
           " (" +
           educationContext(entry) +
-          "): the same field, or the closest name for it. A different field (e.g. engineering for a science major) is never the answer; when none of the results is that field, answer none.",
+          "). Choose the most relevant option: the same field when it is listed, otherwise the closest related field (e.g. Cybersecurity or Information Security for \"Science of Cybersecurity\"). Answer none only when no result is related to that field at all.",
         field,
         options,
       );

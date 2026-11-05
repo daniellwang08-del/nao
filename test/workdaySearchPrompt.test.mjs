@@ -137,7 +137,8 @@ const flowSrc = [
   grab("canonOption"),
   grab("searchTokens"),
   grab("exactSearchResult"),
-  grab("broaderSearchQuery"),
+  grabConst("GENERIC_FIELD_WORDS"),
+  grab("broaderSearchQueries"),
   grab("promptListTexts"),
   grab("waitForPromptResults"),
   grab("revealPromptRow"),
@@ -298,4 +299,58 @@ test("School and Field of Study pickers give the AI the education entry and the 
   await fns.makeFieldOfStudyChooser(entry)("Statistics", fos);
   assert.deepEqual(sent[1].options, fos);
   assert.match(sent[1].label, /"Statistics"/);
+});
+
+
+// ── Field of Study: no option with the profile's wording -> its words, most specific first ──
+test("shorter searches: each meaningful word, specific before generic", () => {
+  const q = new Function(
+    "D",
+    `${grabConst("SEARCH_STOPWORDS")}
+${grabConst("GENERIC_FIELD_WORDS")}
+${grab("canonOption")}
+${grab("searchTokens")}
+${grab("broaderSearchQueries")}
+return broaderSearchQueries;`,
+  )(D0);
+  assert.deepEqual(q("Science of Cybersecurity"), ["cybersecurity", "science"]);
+  assert.deepEqual(q("Computer Science"), ["computer", "science"]);
+  assert.deepEqual(q("Bachelor of Applied Data Analytics and Visualization"), ["visualization", "analytics", "bachelor"]);
+  assert.deepEqual(q("Informatics"), []);
+});
+
+const TENANT_FIELDS = ["Computer Science", "Cybersecurity and Information Assurance", "Data Science", "Information Security", "Political Science"];
+
+test("'Science of Cybersecurity' with no such option: the 'Cybersecurity' search finds the relevant option", async () => {
+  const wd = makeWorkday({ results: byPhrase(TENANT_FIELDS) });
+  const p = picker((options) => options.find((o) => /cyber|security/i.test(o)) || null);
+  assert.equal(await load(wd).fillSearchPrompt(wd.multi, "Science of Cybersecurity", { choose: p.choose, broaden: true }), true, wd.S.log.join("\n"));
+  assert.equal(wd.S.chip, "Cybersecurity and Information Assurance");
+  // The single 'cybersecurity' result was committed by Workday and confirmed by the picker.
+  assert.deepEqual(p.calls.map((c) => c.options), [["Cybersecurity and Information Assurance"]]);
+});
+
+test("specific word finds nothing relevant: the generic word's results are offered and the most relevant is filled", async () => {
+  const fields = ["Computer Science", "Data Science", "Political Science", "Cyber Law"];
+  const wd = makeWorkday({ results: byPhrase(fields) });
+  const p = picker((options) => (options.includes("Computer Science") ? "Computer Science" : null));
+  assert.equal(await load(wd).fillSearchPrompt(wd.multi, "Science of Cybersecurity", { choose: p.choose, broaden: true }), true, wd.S.log.join("\n"));
+  assert.equal(wd.S.chip, "Computer Science");
+  assert.deepEqual(p.calls.at(-1).options, ["Computer Science", "Data Science", "Political Science"]);
+});
+
+test("the full search's results are used first when one is relevant (no shorter searches)", async () => {
+  const fields = ["Cybersecurity Science", "Cybersecurity Management"];
+  const wd = makeWorkday({ results: () => fields });
+  const p = picker(() => "Cybersecurity Science");
+  assert.equal(await load(wd).fillSearchPrompt(wd.multi, "Science of Cybersecurity", { choose: p.choose, broaden: true }), true);
+  assert.equal(wd.S.chip, "Cybersecurity Science");
+  assert.equal(p.calls.length, 1);
+});
+
+test("the Field of Study picker asks for the most relevant option, none only when nothing is related", () => {
+  const body = grab("makeFieldOfStudyChooser");
+  assert.match(body, /most relevant option/);
+  assert.match(body, /closest related field/);
+  assert.match(body, /none only when no result is related/);
 });
