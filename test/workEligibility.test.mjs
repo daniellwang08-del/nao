@@ -42,8 +42,13 @@ test("candidates who need sponsorship answer truthfully", () => {
   assert.equal(workEligibilityAnswer("Are you legally authorized to work in the United States?", visa), "Yes");
 });
 
-test("unset preferences default to authorized without sponsorship", () => {
-  assert.equal(workEligibilityAnswer("Are you legally authorized to work in the United States?", {}), "Yes");
+test("unsaved answers are never assumed: the question is left for the candidate", () => {
+  assert.equal(workEligibilityAnswer("Are you legally authorized to work in the United States?", {}), undefined);
+  assert.equal(workEligibilityAnswer("Will you now or in the future require visa sponsorship?", {}), undefined);
+  // "Authorized without sponsorship" needs both answers saved.
+  assert.equal(workEligibilityAnswer("Are you authorized to work in the US without sponsorship?", { authorized: true }), undefined);
+  assert.equal(workEligibilityAnswer("Are you legally authorized to work in the United States?", { authorized: true }), "Yes");
+  assert.equal(workEligibilityAnswer("Will you now or in the future require visa sponsorship?", { sponsorship: false }), "No");
 });
 
 test("other countries and unrelated questions are left alone", () => {

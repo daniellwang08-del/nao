@@ -4,15 +4,21 @@
 // confirm a form is on screen.
 
 // Button or link text that opens an application (lowercase, spaces collapsed).
-export const APPLY_TEXT =
-  "^(apply|apply now|apply here|apply online|apply today|easy apply|quick apply|" +
-  "apply for (this|the) (job|position|role|opening)|apply (to|for) (this )?(job|position|role|opening)|apply for job|" +
-  "start (your |my )?application|begin (your )?application|i'?m interested|apply on (the )?company (site|website))$";
+// Arrows, icons and punctuation around the words are allowed ("Apply now →",
+// "Apply for this job ↗", "Apply arrow_forward"), as is screen-reader text
+// such as "(opens in a new tab)".
+const APPLY_WORDS =
+  "apply|apply now|apply here|apply online|apply today|easy apply|quick apply|" +
+  "apply (to|for) (this |the )?(job|position|role|opening|vacancy)( online| now)?|" +
+  "start (your |my )?application|begin (your )?application|i'?m interested|apply on (the )?company (site|website)";
+const APPLY_TRAIL = "arrow_[a-z_]+|chevron_right|navigate_next|open_in_new|launch|north_east|east|\\(?opens? in (a )?new (tab|window)\\)?";
+export const APPLY_TEXT = `^[^a-z0-9']*(${APPLY_WORDS})([^a-z0-9']+(${APPLY_TRAIL}))*[^a-z0-9']*$`;
 // Apply buttons that lead to a sign-in or another site's profile instead.
 export const NOT_APPLY_TEXT = "linkedin|indeed|google|facebook|seek|sign in|log in|login|register|create account";
 // Stable markers on apply buttons whose text may vary or be an icon.
 export const APPLY_ATTR = "overview-apply-now|apply-now|apply-button|applybutton|btn-apply|job-apply|apply_button";
-// Visible fields that make a page an application form rather than a listing.
+// With an email and a name field, how many visible fields make an application
+// (email + name + at least one more).
 export const MIN_FORM_FIELDS = 3;
 // A posting that is gone: expired, filled, closed, removed, or a not-found page.
 export const GONE_TEXT =
@@ -23,10 +29,14 @@ export const GONE_TEXT =
   "(page|job|position) (could not|couldn'?t|cannot|can'?t) be found|(page|job|position|posting) not found|" +
   "couldn'?t find (anything|the page|that page|the job|this job|that job)|(page|job|position|posting) (doesn'?t|does not) exist|" +
   "applications? (are |is )?(now )?closed|not accepting (applications|candidates)|^404\\b|\\b404 (error|not found)|error 404|" +
-  "you'?ve gone too far";
+  "you'?ve gone too far|(hiring|recruiting|position|job|posting|requisition)( for this (job|position|role))? (has been put|is( currently)?) on hold";
 // Where job boards send a dead posting: Greenhouse back to the board with
 // ?error=true, Workable to the company page with ?not_found=true.
 export const GONE_URL = "[?&](error|not_found)=true\\b|/(404|not-found|job-not-found)(/|$|\\?)";
+
+// What callers say when the page cannot be filled safely.
+export const NO_FORM_MESSAGE = "Couldn't find the application form on this page. Open it, then try again.";
+export const NEEDS_ACCOUNT_MESSAGE = "This site wants you to sign in or create an account before applying. Do that, open the application, then try again.";
 
 export function isGoneText(text) {
   const t = String(text || "").replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, " ").trim().toLowerCase();
@@ -34,15 +44,22 @@ export function isGoneText(text) {
 }
 
 export function isApplyText(text) {
-  const t = String(text || "").replace(/\s+/g, " ").trim().toLowerCase();
+  const t = String(text || "").replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, " ").trim().toLowerCase();
   return !!t && new RegExp(APPLY_TEXT).test(t) && !new RegExp(NOT_APPLY_TEXT).test(t);
 }
 
 /**
  * Runs in the page (chrome.scripting, so it must stay self-contained): reports
- * whether a form is showing and, when `act` is set and none is, opens the
- * application. Links are returned for the caller to load in the same tab, so
- * target=_blank does not scatter tabs.
+ * whether an application form is showing and, when `act` is set and none is,
+ * opens the application. Links are returned for the caller to load in the same
+ * tab, so target=_blank does not scatter tabs.
+ *
+ * Visible inputs alone are not an application: career pages carry job filters,
+ * "refer a friend" and "email me this job" forms, job-alert signups and
+ * sign-in walls. A form counts only on application evidence: a resume/CV
+ * upload, or an email plus a name plus another field. A password box without
+ * an upload is an account wall and is reported as `account`.
+ * Open shadow roots (SmartRecruiters' web components) are searched too.
  */
 export function probeApplyPage(rules, act) {
   const visible = (el) => {
@@ -55,37 +72,147 @@ export function probeApplyPage(rules, act) {
       return false;
     }
   };
-  const text = (el) => String(el.innerText || el.textContent || el.value || el.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim().toLowerCase();
-  const fieldSel = "input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=submit]):not([type=button]):not([type=search]), textarea, select";
+  const text = (el) =>
+    String(el.innerText || el.textContent || el.value || el.getAttribute("aria-label") || "")
+      .replace(/[\u2018\u2019]/g, "'")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase();
+  // querySelectorAll does not enter shadow roots; walk the open ones.
+  const deepAll = (sel) => {
+    const out = [];
+    const walk = (root, depth) => {
+      out.push(...Array.from(root.querySelectorAll(sel)));
+      if (depth > 8) return;
+      for (const node of Array.from(root.querySelectorAll("*"))) if (node.shadowRoot) walk(node.shadowRoot, depth + 1);
+    };
+    walk(document, 0);
+    return out;
+  };
+  const attr = (el, k) => (el && el.getAttribute && el.getAttribute(k)) || "";
+  const labelOf = (el) => {
+    let t = "";
+    try {
+      if (el.labels) t = Array.from(el.labels, (l) => l.innerText || l.textContent || "").join(" ");
+    } catch {
+      /* ignore */
+    }
+    const by = attr(el, "aria-labelledby");
+    if (by) {
+      const root = el.getRootNode ? el.getRootNode() : document;
+      for (const id of by.split(/\s+/)) {
+        const n = root && root.getElementById ? root.getElementById(id) : null;
+        if (n) t += " " + (n.innerText || n.textContent || "");
+      }
+    }
+    return t;
+  };
+  const describe = (el) =>
+    [el.name, el.id, el.placeholder, attr(el, "autocomplete"), attr(el, "aria-label"), attr(el, "data-ui"), attr(el, "data-qa"), attr(el, "data-testid"), labelOf(el)]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+  const fieldSel = "input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=submit]):not([type=button]):not([type=search]):not([type=image]):not([type=reset]), textarea, select";
+  const emailRe = /e-?mail/;
+  const nameRe = /(^|[^a-z])(first|last|full|given|family|legal|preferred|candidate|sur|f|l)?[-_ .]?name([^a-z]|$)/;
+  const friendRe = /friend|recipient|colleague/;
   // Career pages put job-alert and newsletter signups (name, email, interests)
   // next to the description; those are not the application.
   const signupRe = /job.?alert|newsletter|subscri|talent.?(community|network|pool)|join our talent|stay (connected|in touch)|get (notified|job updates)|keep me (posted|updated)/i;
-  const signupForms = new Map();
-  const isSignup = (el) => {
-    const form = el.closest("form");
-    if (!form) return false;
-    if (!signupForms.has(form)) {
-      const marks = [form.id, form.className && String(form.className), form.getAttribute("action"), form.getAttribute("name"), form.getAttribute("aria-label")].join(" ");
-      const inner = Array.from(form.querySelectorAll("[class], [id]"), (n) => `${n.id} ${String(n.className)}`).join(" ");
-      const hasFile = !!form.querySelector("input[type=file]");
-      signupForms.set(form, !hasFile && (signupRe.test(marks) || signupRe.test(inner) || signupRe.test(String(form.innerText || "").slice(0, 300))));
+  // Forms that pass the posting on rather than apply to it.
+  const referRe = /refer[-_ ]?(a[-_ ])?(friend|someone|candidate)|referral[-_ ]?form|share[-_ ](this[-_ ])?(job|position|role|posting)|e-?mail[-_ ](me[-_ ])?this[-_ ](job|position|role|posting)|send[-_ ](this[-_ ])?(job|position)?[-_ ]?to[-_ ](a[-_ ])?friend|tell[-_ ]a[-_ ]friend/i;
+
+  // Nearest <form>, climbing out of shadow roots; null for formless pages.
+  const formOf = (el) => {
+    let node = el;
+    for (let i = 0; node && i < 12; i++) {
+      const f = node.closest ? node.closest("form") : null;
+      if (f) return f;
+      const root = node.getRootNode ? node.getRootNode() : null;
+      node = root && root.host ? root.host : null;
     }
-    return signupForms.get(form);
+    return null;
   };
-  const fields = Array.from(document.querySelectorAll(fieldSel)).filter(
-    (el) =>
-      visible(el) &&
-      !el.closest("header, nav, footer, [role=search], [role=dialog][data-ui=cookie-consent]") &&
-      !/search|newsletter|subscribe/i.test(`${el.name} ${el.id} ${el.placeholder || ""}`) &&
-      !isSignup(el)
-  ).length;
-  const fileInForm = !!document.querySelector("form input[type=file]");
-  const ready = fields >= rules.minFields || (fileInForm && fields >= 1);
+  const PAGE = { page: true };
+  const groups = new Map();
+  let fields = 0;
+  for (const el of deepAll(fieldSel)) {
+    const isFile = String(el.type || "").toLowerCase() === "file";
+    const shown = visible(el);
+    // Upload inputs are usually hidden behind a styled button; the rest must show.
+    if (!shown && !isFile) continue;
+    if (el.closest && el.closest("header, nav, footer, [role=search], [role=dialog][data-ui=cookie-consent]")) continue;
+    if (/search|newsletter|subscribe/i.test(`${el.name} ${el.id} ${el.placeholder || ""}`)) continue;
+    const key = formOf(el) || PAGE;
+    if (!groups.has(key)) groups.set(key, { shown: 0, file: false, email: false, name: false, password: false, user: false, phone: false, friend: false });
+    const g = groups.get(key);
+    if (shown) {
+      fields += 1;
+      g.shown += 1;
+    }
+    const d = describe(el);
+    if (isFile) {
+      // A photo upload is not a resume.
+      if (!/^\s*(image\/[^,]*|\.(png|jpe?g|gif|webp))(\s*,\s*(image\/[^,]*|\.(png|jpe?g|gif|webp)))*\s*$/i.test(attr(el, "accept"))) g.file = true;
+      continue;
+    }
+    if (String(el.type || "").toLowerCase() === "password") g.password = true;
+    else if (String(el.type || "").toLowerCase() === "email" || emailRe.test(d)) g.email = true;
+    else if (/user.?(name|id)|login/.test(d)) g.user = true;
+    else if (nameRe.test(d) && !/company.?name|file.?name/.test(d)) g.name = true;
+    if (String(el.type || "").toLowerCase() === "tel" || /phone|mobile/.test(d)) g.phone = true;
+    if (friendRe.test(d)) g.friend = true;
+  }
+
+  const formMarks = new Map();
+  const marksOf = (form) => {
+    if (!formMarks.has(form)) {
+      const own = [form.id, form.className && String(form.className), attr(form, "action"), attr(form, "name"), attr(form, "aria-label"), attr(form, "data-ui"), attr(form, "data-testid")].join(" ");
+      let inner = "";
+      try {
+        inner = Array.from(form.querySelectorAll("[class], [id]"), (n) => `${n.id} ${String(n.className)}`).join(" ");
+      } catch {
+        /* ignore */
+      }
+      formMarks.set(form, { own, inner, text: String(form.innerText || "").slice(0, 300) });
+    }
+    return formMarks.get(form);
+  };
+  // A sign-in step that asks for the email first (the password comes next).
+  const accountRe = /sign[-_ ]?in|log[-_ ]?in|create (an |your )?account|sign[-_ ]?up|register/i;
+  let ready = false;
+  let account = false;
+  for (const [key, g] of groups) {
+    // A password box without an upload is a sign-in or sign-up, even when the
+    // page wraps it in one big form with a job-alert block (SuccessFactors).
+    if (g.password && !g.file) {
+      account = true;
+      continue;
+    }
+    const m = key === PAGE ? { own: "", inner: "", text: "" } : marksOf(key);
+    if (key !== PAGE) {
+      // An upload or a phone number marks an application even if the form
+      // offers to join a talent pool or subscribe to texts.
+      if (!g.file && (signupRe.test(m.own) || (!g.phone && (signupRe.test(m.inner) || signupRe.test(m.text))))) continue;
+      if (referRe.test(m.own) || (!g.file && (referRe.test(m.inner) || referRe.test(m.text)))) continue;
+    }
+    if (g.friend && !g.file) continue;
+    if (!g.file && (g.email || g.user) && !g.name && accountRe.test(`${document.title || ""} ${m.own} ${m.text}`)) {
+      account = true;
+      continue;
+    }
+    // A formless page needs more than a stray upload control.
+    const upload = g.file && g.shown >= 1 && (key !== PAGE || g.email || g.name);
+    const contact = g.email && g.name && g.shown >= rules.minFields;
+    if (upload || contact) ready = true;
+  }
+  if (ready) account = false;
+
   // Only a page without a form can be a dead posting. Headings and alerts are
   // read in full; body text only on a sparse page, where a description
   // mentioning "applications closed on Friday" cannot be the cause.
   let gone = false;
-  if (!ready && rules.goneText) {
+  if (!ready && !account && rules.goneText) {
     const goneRe = new RegExp(rules.goneText);
     const norm = (t) => String(t || "").replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, " ").trim().toLowerCase();
     gone = !!rules.goneUrl && new RegExp(rules.goneUrl, "i").test(String(location.pathname || "") + String(location.search || ""));
@@ -99,16 +226,17 @@ export function probeApplyPage(rules, act) {
       gone = body.length > 0 && body.length < 1500 && goneRe.test(body);
     }
   }
-  if (ready || !act) return { ready, fields, gone };
+  const base = account ? { ready, fields, gone, account } : { ready, fields, gone };
+  if (ready || gone || !act) return base;
 
   const applyText = new RegExp(rules.applyText);
   const notApply = new RegExp(rules.notApplyText);
   const applyAttr = new RegExp(rules.applyAttr);
-  const candidates = Array.from(document.querySelectorAll("a, button, [role=button], input[type=button], input[type=submit]"))
-    .filter((el) => visible(el) && !el.disabled && el.getAttribute("aria-disabled") !== "true")
+  const candidates = deepAll("a, button, [role=button], input[type=button], input[type=submit]")
+    .filter((el) => visible(el) && !el.disabled && attr(el, "aria-disabled") !== "true")
     .map((el) => {
       const t = text(el);
-      const attrs = [el.id, el.className && String(el.className), el.getAttribute("data-ui"), el.getAttribute("data-testid"), el.getAttribute("data-qa")]
+      const attrs = [el.id, el.className && String(el.className), attr(el, "data-ui"), attr(el, "data-testid"), attr(el, "data-qa")]
         .filter(Boolean)
         .join(" ")
         .toLowerCase();
@@ -119,8 +247,8 @@ export function probeApplyPage(rules, act) {
     .filter(Boolean)
     .sort((a, b) => b.score - a.score);
   const hit = candidates[0];
-  if (!hit) return { ready: false, fields, gone };
-  const href = hit.el.tagName === "A" ? hit.el.getAttribute("href") || "" : "";
+  if (!hit) return base;
+  const href = hit.el.tagName === "A" ? attr(hit.el, "href") : "";
   if (href && !/^(#|javascript:|mailto:)/i.test(href)) {
     try {
       const url = new URL(href, location.href);
@@ -139,6 +267,8 @@ export function probeApplyPage(rules, act) {
 }
 
 const RULES = { applyText: APPLY_TEXT, notApplyText: NOT_APPLY_TEXT, applyAttr: APPLY_ATTR, minFields: MIN_FORM_FIELDS, goneText: GONE_TEXT, goneUrl: GONE_URL };
+// The rules probeApplyPage is called with (tests and tooling run it directly).
+export const PROBE_RULES = RULES;
 const HOPS = 3;
 
 function sleep(ms) {
@@ -178,13 +308,16 @@ const RENDER_WAIT_MS = 8000;
  * Make sure the tab shows an application form, clicking through "Apply" up to
  * a few times. A click that opens a new tab is folded back into this one.
  * `focus(tabId)` brings a background tab to the front when the form is slow.
- * Returns { ready, gone, steps: [labels clicked], tab }; `gone` means the
- * posting itself is expired or removed.
+ * Returns { ready, gone, account, steps: [labels clicked], tab }; `gone` means
+ * the posting itself is expired or removed, `account` that the page asks to
+ * sign in or create an account instead of showing an application.
  */
 export async function reachApplicationForm(tabId, { onStep = () => {}, waitMs = 15_000, focus = null } = {}) {
   const steps = [];
+  let account = false;
   for (let hop = 0; hop <= HOPS; hop++) {
     const frames = await probe(tabId, false);
+    account = frames.some((f) => f.account);
     if (frames.some((f) => f.ready)) return { ready: true, gone: false, steps, tab: await chrome.tabs.get(tabId) };
     if (frames.some((f) => f.gone)) return { ready: false, gone: true, steps, tab: await chrome.tabs.get(tabId).catch(() => null) };
     if (hop === HOPS) break;
@@ -216,6 +349,7 @@ export async function reachApplicationForm(tabId, { onStep = () => {}, waitMs = 
     }
     if (action && action.ready) return { ready: true, gone: false, steps, tab: await chrome.tabs.get(tabId) };
     if (action && action.gone) return { ready: false, gone: true, steps, tab: await chrome.tabs.get(tabId).catch(() => null) };
+    if (action && action.account) account = true;
     if (!action || !(action.href || action.clicked)) break;
     steps.push(action.label || "Apply");
     onStep(`Opening the application ("${action.label || "Apply"}")…`);
@@ -250,10 +384,14 @@ export async function reachApplicationForm(tabId, { onStep = () => {}, waitMs = 
       if (!tab) return { ready: false, gone: false, steps, tab: null };
       if (tab.status !== "complete") continue;
       const now = await probe(tabId, false);
-      if (now.some((f) => f.ready || f.gone)) break;
+      if (now.some((f) => f.ready || f.gone || f.account)) break;
     }
   }
   const tab = await chrome.tabs.get(tabId).catch(() => null);
+  // The same Apply clicked again and again opened nothing: a stray sign-in box elsewhere on the
+  // page (an employee "Log in") is not the reason, so report the failed click instead.
+  const stuck = steps.length >= 2 && steps[steps.length - 1] === steps[steps.length - 2];
+  if (account && !stuck) return { ready: false, gone: false, account: true, steps, tab };
   return { ready: false, gone: !!tab && (await jobGone(tabId, GONE_WAIT_MS)), steps, tab };
 }
 

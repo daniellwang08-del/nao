@@ -8,7 +8,7 @@
 // mark applied. Anything it cannot finish is left open in its tab for the user.
 
 import * as api from "../api.js";
-import { jobGone, reachApplicationForm } from "../applyForm.js";
+import { NEEDS_ACCOUNT_MESSAGE, NO_FORM_MESSAGE, jobGone, reachApplicationForm } from "../applyForm.js";
 import * as storage from "../storage.js";
 import { detectPlatform, resolveEngine } from "../engines.js";
 import { docsComplete, jobFromSession } from "../panel/actions/job.js";
@@ -368,9 +368,12 @@ async function run(cfg) {
     if (!reached.tab) throw new Stop("failed", "The application tab was closed.");
     tab = reached.tab;
     if (reached.gone) throw postingGone();
+    if (!reached.ready && reached.account) throw needsYou(NEEDS_ACCOUNT_MESSAGE);
     if (!reached.ready && reached.steps.length) {
       throw needsYou(`Clicked "${reached.steps[reached.steps.length - 1]}" but no application form opened. Open it on the page.`);
     }
+    // No form and no Apply button: never fill whatever inputs the page has.
+    if (!reached.ready) throw needsYou(NO_FORM_MESSAGE);
   } else if (await jobGone(tab.id)) {
     throw postingGone();
   }

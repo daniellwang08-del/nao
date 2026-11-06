@@ -739,9 +739,9 @@
     // CC-305 / OFCCP disability self-ID ONLY, never bare /disability/ (hits
     // Acknowledgment + reasonable-accommodation Application Questions).
     if (isDisabilitySelfIdLabel(low)) {
-      return e.disability
-        ? "Yes, I have a disability"
-        : "No, I do not have a disability and have not had one in the past";
+      if (e.disability === true) return "Yes, I have a disability";
+      if (e.disability === false) return "No, I do not have a disability and have not had one in the past";
+      return "I do not want to answer";
     }
     const eligibility = workEligibilityAnswer(low, e);
     if (eligibility) return eligibility;
@@ -771,9 +771,9 @@
       // Old patterns required adjacent "require sponsorship" and missed this wording.
       [
         /sponsorship|immigration filing|work visa|visa sponsorship|open work permit|permanent residency/i,
-        e.sponsorship ? "Yes" : "No",
+        savedYesNo(e.sponsorship),
       ],
-      [/do you now or in the future require|will you now or in the future require|might you in the future require/i, e.sponsorship ? "Yes" : "No"],
+      [/do you now or in the future require|will you now or in the future require|might you in the future require/i, savedYesNo(e.sponsorship)],
       [/use or work on the workday|work on the workday system|workday system/i, "No"],
       [/current or former employee of the united states government|u\.?\s*s\.?\s*government employee|employee of the united states government/i, "No"],
       // Export-control restricted countries/regions question (keep anchored to that topic).
@@ -837,18 +837,26 @@
     /\bcanada\b|\bunited kingdom\b|\bu\.?k\.?\b|\bbritain\b|\beurope\b|\beu\b|\bgermany\b|\bfrance\b|\bireland\b|\bnetherlands\b|\bspain\b|\bitaly\b|\bpoland\b|\bindia\b|\baustralia\b|\bnew zealand\b|\bmexico\b|\bbrazil\b|\bsingapore\b|\bjapan\b|\bchina\b|\bisrael\b/i;
   const US_COUNTRY_RE = /\bunited states\b|\bu\.?\s?s\.?(?:a\.?)?\b|\bamerica\b/i;
 
+  // "Yes" / "No" from a saved true / false; undefined when the candidate never saved it.
+  function savedYesNo(v) {
+    return v === true ? "Yes" : v === false ? "No" : undefined;
+  }
+
+  // Unsaved answers are never assumed (legal statements): undefined sends the question to the
+  // server, which leaves it for the candidate with where to save the answer.
   function workEligibilityAnswer(labelOrLow, eeo) {
     const low = String(labelOrLow || "").toLowerCase();
     if (!low || NEGATED_AUTH_RE.test(low)) return undefined;
     if (NON_US_COUNTRY_RE.test(low) && !US_COUNTRY_RE.test(low)) return undefined;
     const e = eeo || {};
-    const authorized = e.authorized !== false;
-    const needsSponsorship = e.sponsorship === true;
+    const authorized = typeof e.authorized === "boolean" ? e.authorized : null;
+    const needsSponsorship = typeof e.sponsorship === "boolean" ? e.sponsorship : null;
     if (WITHOUT_SPONSORSHIP_RE.test(low) && (WORK_AUTH_Q_RE.test(low) || /\bwork\b/.test(low))) {
+      if (authorized === null || needsSponsorship === null) return undefined;
       return authorized && !needsSponsorship ? "Yes" : "No";
     }
-    if (SPONSORSHIP_NEED_RE.test(low)) return needsSponsorship ? "Yes" : "No";
-    if (WORK_AUTH_Q_RE.test(low)) return authorized ? "Yes" : "No";
+    if (SPONSORSHIP_NEED_RE.test(low)) return savedYesNo(needsSponsorship);
+    if (WORK_AUTH_Q_RE.test(low)) return savedYesNo(authorized);
     return undefined;
   }
 
@@ -4217,7 +4225,9 @@
     const isDecline = (t) => /do not want to answer/.test(t);
     const group = rows.filter((x) => isYes(x.t) || isNo(x.t) || isDecline(x.t));
     if (group.length < 2) return; // not the CC-305 group on this page
-    const target = (e.disability ? group.find((x) => isYes(x.t)) : group.find((x) => isNo(x.t))) || group.find((x) => isNo(x.t));
+    // Saved answer, otherwise decline: a disability status is never assumed.
+    const target =
+      e.disability === true ? group.find((x) => isYes(x.t)) : e.disability === false ? group.find((x) => isNo(x.t)) : group.find((x) => isDecline(x.t));
     if (!target) return;
     // Single-select: clear any other option first.
     for (const x of group) {
@@ -6324,10 +6334,9 @@
       }
     }
     if (isDisabilitySelfIdLabel(low)) {
-      return (
-        pick(e.disability ? "Yes, I have a disability" : "No, I do not have a disability and have not had one in the past") ||
-        pick(e.disability ? "Yes" : "No")
-      );
+      if (e.disability === true) return pick("Yes, I have a disability") || pick("Yes");
+      if (e.disability === false) return pick("No, I do not have a disability and have not had one in the past") || pick("No");
+      return pick("I do not want to answer");
     }
     // resolveByLabel may return a short hint; only accept if it snaps to a real option.
     const fromRules = resolveByLabel(label, profile || {});

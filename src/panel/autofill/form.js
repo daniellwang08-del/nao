@@ -3,7 +3,7 @@
 // and walk multi-page flows (Lever, Workable, SmartRecruiters, iCIMS, ...).
 
 import * as api from "../../api.js";
-import { reachApplicationForm } from "../../applyForm.js";
+import { NEEDS_ACCOUNT_MESSAGE, NO_FORM_MESSAGE, reachApplicationForm } from "../../applyForm.js";
 import { hostOf } from "../../autoapply/platforms.js";
 import { autofillPermissionOrigins, resolveEngine } from "../../engines.js";
 import * as storage from "../../storage.js";
@@ -146,7 +146,24 @@ export async function startAutofill({ tab: targetTab = null, headless = false, r
       const hop = await reachApplicationForm(tab.id, { waitMs: headless ? 25_000 : 15_000, focus: focusGate() });
       if (!hop.tab) return fail("The application tab was closed.");
       if (hop.gone) return fail("This job posting is no longer available (expired, filled or removed).");
-      if (!hop.ready && hop.steps.length) return fail(`Clicked "${hop.steps[hop.steps.length - 1]}" but no application form opened.`);
+      if (!hop.ready) {
+        // iCIMS walks its own login and profile steps (prepareIcims writes the
+        // portal login), so a page without the form yet is still its to handle.
+        const ownSteps = engine.platform === "icims";
+        if (hop.account && !ownSteps) return fail(NEEDS_ACCOUNT_MESSAGE);
+        if (hop.steps.length) return fail(`Clicked "${hop.steps[hop.steps.length - 1]}" but no application form opened.`);
+        // Custom career pages may hide the form behind an "I accept" terms overlay: accept it,
+        // then look again before giving up.
+        let revealed = false;
+        if (!ownSteps && engine.platform === "generic") {
+          const injected = await chrome.runtime.sendMessage({ type: "AUTOFILL_INJECT", tabId: tab.id, engine: engine.scripts });
+          if (injected && injected.ok && (await prepareGeneric(tab.id)).clicked > 0) {
+            revealed = (await reachApplicationForm(tab.id, { waitMs: 8_000, focus: focusGate() })).ready;
+          }
+        }
+        // No form and no Apply button: filling now would fill whatever inputs the page has.
+        if (!ownSteps && !revealed) return fail(NO_FORM_MESSAGE);
+      }
       if (hop.steps.length && hostOf(hop.tab.url) !== hostOf(tab.url)) {
         return startAutofill({ tab: hop.tab, headless, reached: true });
       }
