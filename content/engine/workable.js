@@ -447,7 +447,7 @@
     }
     const started = Date.now();
     while (Date.now() - started < timeoutMs) {
-      await new Promise((r) => setTimeout(r, 250));
+      await wbSleep(250);
       const now = resumeZoneState();
       if (now.error) return { uploaded: false, reason: "rejected", error: now.error.slice(0, 200), filename: name };
       // When a restored draft already held a file, the replacement counts only
@@ -504,6 +504,12 @@
     }
   }
 
+  // Not throttled in a hidden (auto-apply) tab, see dom.js sleep.
+  function wbSleep(ms) {
+    const s = AF.dom && AF.dom.sleep;
+    return s ? s(ms) : new Promise((r) => setTimeout(r, ms));
+  }
+
   function isMonthYearInput(el) {
     return !!el && /^mm\s*\/\s*yyyy$/i.test(String(el.getAttribute("placeholder") || "").trim());
   }
@@ -518,7 +524,7 @@
     const [month, year] = m[1].length === 4 ? [m[2], m[1]] : [m[1], m[2]];
     const mm = month.padStart(2, "0");
     const want = `${mm}/${year}`;
-    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const sleep = wbSleep;
     const closePicker = () => {
       try {
         el.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));

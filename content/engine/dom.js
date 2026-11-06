@@ -67,7 +67,41 @@
     return r.width > 0 && r.height > 0;
   }
 
-  const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+  // Chrome throttles timers in hidden tabs (each wait becomes about 1 s, then up to 1 min after
+  // 5 minutes hidden), and auto-apply fills in background tabs. While the tab is hidden, waits run
+  // in the extension's service worker, whose timers are not throttled, and its reply resumes the
+  // page right away. A visible tab keeps plain timers.
+  function sleep(ms) {
+    const wait = Math.max(0, Number(ms) || 0);
+    let runtime = null;
+    try {
+      runtime = typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.id ? chrome.runtime : null;
+    } catch {
+      runtime = null;
+    }
+    if (document.visibilityState !== "hidden" || !runtime) return new Promise((r) => setTimeout(r, wait));
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (!done) {
+          done = true;
+          resolve();
+        }
+      };
+      try {
+        runtime.sendMessage({ type: "NAO_SLEEP", ms: Math.min(wait, 20000) }, () => {
+          void (runtime && runtime.lastError);
+          finish();
+        });
+      } catch {
+        setTimeout(finish, wait);
+        return;
+      }
+      // No reply (service worker unavailable): the throttled timer still ends the wait.
+      setTimeout(finish, wait + 3000);
+    });
+  }
+  const delay = (ms) => sleep(ms);
 
   // Poll until fn() returns truthy or the timeout elapses. Custom widgets render
   // asynchronously, so fixed delays are unreliable.
@@ -757,6 +791,7 @@
     containsWord,
     textsMatch,
     isVisible,
+    sleep,
     delay,
     waitUntil,
     setNativeValue,

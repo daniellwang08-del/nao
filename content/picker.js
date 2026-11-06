@@ -1541,7 +1541,7 @@
   // [data-ui="group"] cards. Prep fills any missing rows from the profile before
   // the generic LLM pass (which excludes these subtrees).
   function wbDelay(ms) {
-    return new Promise((r) => setTimeout(r, ms));
+    return dom.sleep ? dom.sleep(ms) : new Promise((r) => setTimeout(r, ms));
   }
 
   async function wbWait(check, timeoutMs, intervalMs) {
@@ -1648,7 +1648,7 @@
         // Workable reports "no unsaved changes" for this entry through a 200 ms debounce, and
         // merges each report onto the state it last rendered with. Let that report land before
         // the next editor opens and starts reporting, or the saved entry can stay flagged.
-        await wbDelay(WB_SETTLE_MS);
+        await wbSettle(sectionUi);
         return true;
       }
     }
@@ -1668,6 +1668,18 @@
   }
 
   const WB_SETTLE_MS = 450;
+
+  // Wait until Workable no longer reports this group as unsaved (its debounced report landed).
+  // State-driven, because in a hidden tab that debounce timer is throttled to about 1 s; falls
+  // back to a fixed wait when the state cannot be read.
+  async function wbSettle(sectionUi) {
+    await wbDelay(WB_SETTLE_MS);
+    if (!wbUnsavedGroups()) return;
+    await wbWait(() => {
+      const g = wbUnsavedGroups();
+      return !g || !g[sectionUi];
+    }, 6000, 100);
+  }
 
   // Workable's own unsaved-changes answer, read in the page world by page-bridge.js.
   // Returns {} when clean, {education: true, experience: true} for flagged groups, or null when

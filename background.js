@@ -712,6 +712,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true;
 });
 
+// Hidden-tab waits for page code (content/engine/dom.js sleep): page timers are throttled in a
+// background tab, the service worker's are not, and this reply resumes the page immediately.
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!(msg && msg.type === "NAO_SLEEP")) return false;
+  if (!sender || sender.id !== chrome.runtime.id) return false;
+  const ms = Math.max(0, Math.min(Number(msg.ms) || 0, 20000));
+  setTimeout(() => {
+    try {
+      sendResponse(true);
+    } catch {
+      /* the page went away */
+    }
+  }, ms);
+  return true;
+});
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!(msg && msg.type === "OPEN_AUTO_APPLY")) return false;
   openAutoApplyConsole()
