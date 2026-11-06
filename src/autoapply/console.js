@@ -22,6 +22,7 @@ import {
   filterHistory,
   formatDuration,
   isWaiting,
+  splitUnqueue,
   nextRunnable,
   stageIndex,
   stageOf,
@@ -624,10 +625,29 @@ async function retryEntries(jobIds) {
     await chrome.storage.session.remove("aaHandoff:" + tabId).catch(() => {});
     await chrome.tabs.remove(tabId).catch(() => {});
   }
-  if (jobIds.length > 1) log("info", `${jobIds.length} jobs moved back to the queue.`);
   await loadQueue();
   if (store.phase === "running") pump();
   resumeIfUnblocked();
+}
+
+/**
+ * Unqueue: waiting jobs leave Waiting on you and go back to the to-do queue at
+ * their normal place (not apply later), so they are filled again from scratch
+ * when the run reaches them, now or after the user starts again. Their tabs close.
+ */
+async function unqueueEntries(jobIds) {
+  const { requeue, kept } = splitUnqueue(store.history, jobIds);
+  if (requeue.length) {
+    const title = (store.history[requeue[0]] || {}).title || "job";
+    await retryEntries(requeue);
+    log("info", requeue.length === 1 ? `Back in the queue: ${title}.` : `${requeue.length} jobs moved back to the queue.`);
+  }
+  if (kept.length) {
+    notify(
+      "warn",
+      `${kept.length} job${kept.length === 1 ? " was" : "s were"} already submitted, so ${kept.length === 1 ? "it stays" : "they stay"} in Waiting on you. Mark ${kept.length === 1 ? "it" : "them"} applied once you see the confirmation.`,
+    );
+  }
 }
 
 const markEntryApplied = (jobId) => markEntriesApplied([jobId]);
@@ -1232,11 +1252,12 @@ function Waiting({ s, now }) {
   const bulk = (kind) => {
     const n = targets.length;
     const ACTIONS = {
-      retry: {
-        title: `Retry ${scope(n)} now?`,
-        message: "Their tabs close and they go back into the queue at their normal place, to be filled again.",
-        confirmLabel: "Retry now",
-        run: () => retryEntries(targets),
+      unqueue: {
+        title: `Unqueue ${scope(n)}?`,
+        message:
+          "Their tabs close and they go back to the to-do queue at their normal place (not apply later). They are filled again from scratch when the run reaches them. Already submitted jobs stay here.",
+        confirmLabel: "Unqueue",
+        run: () => unqueueEntries(targets),
       },
       later: {
         title: `Move ${scope(n)} to apply later?`,
@@ -1307,7 +1328,13 @@ function Waiting({ s, now }) {
             <span>${selected.length ? `${selected.length} of ${ids.length} selected` : `Select (acts on all ${ids.length})`}</span>
           </label>
           <div class="aa-bulk-actions">
-            <${Button} size="sm" variant="secondary" icon="refresh" onClick=${() => bulk("retry")}>Retry now</${Button}>
+            <${Button}
+              size="sm"
+              variant="secondary"
+              icon="refresh"
+              title="Close their tabs and put them back in the to-do queue, to be filled again later"
+              onClick=${() => bulk("unqueue")}
+            >${selected.length ? `Unqueue ${selected.length}` : "Unqueue all"}</${Button}>
             <${Button} size="sm" variant="secondary" icon="clock" onClick=${() => bulk("later")}>Apply later</${Button}>
             <${Button} size="sm" variant="secondary" icon="check" onClick=${() => bulk("applied")}>Mark applied</${Button}>
             <${Button} size="sm" variant="ghost" icon="x" onClick=${() => bulk("invalid")}>Invalid</${Button}>
@@ -1335,7 +1362,7 @@ function Waiting({ s, now }) {
               <div class="aa-item-actions aa-item-actions-more">
                 <${Button} size="sm" variant="ghost" icon="clock" title="Close the tab and try again after the rest of the queue" onClick=${() => void applyLater([id])}>Apply later</${Button}>
                 <${Button} size="sm" variant="ghost" icon="x" title="Not a real or open job: hide it and never try it again" onClick=${() => invalid(id, h)}>Invalid job</${Button}>
-                <${IconButton} icon="refresh" label="Retry now" size=${14} onClick=${() => void forgetEntry(id)} />
+                <${IconButton} icon="refresh" label="Unqueue: back to the to-do queue" size=${14} onClick=${() => void unqueueEntries([id])} />
               </div>
             </article>`,
           )}

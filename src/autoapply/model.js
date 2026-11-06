@@ -142,6 +142,23 @@ export function closedWithoutSubmit(entry, now = Date.now()) {
   return { ...entry, status: "later", message: CLOSED_UNSUBMITTED, at: now, tabOpen: false };
 }
 
+/**
+ * Waiting jobs that can go back to the to-do queue (Unqueue). A job auto-apply
+ * already submitted stays where it is, even if the site never confirmed:
+ * queueing it again would send a second application.
+ */
+export function splitUnqueue(history, ids) {
+  const requeue = [];
+  const kept = [];
+  for (const id of ids) {
+    const h = history && history[id];
+    if (!h) continue;
+    if (h.submitted) kept.push(id);
+    else requeue.push(id);
+  }
+  return { requeue, kept };
+}
+
 const NOT_ATTEMPTS = new Set(["skipped", "later", "invalid"]);
 
 /**

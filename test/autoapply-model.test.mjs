@@ -127,3 +127,14 @@ test("formatting helpers", () => {
   assert.equal(easeLabel("workday"), "Manual");
   assert.equal(easeLabel("board"), "Manual");
 });
+
+test("unqueue sends waiting jobs back to the queue, never an already submitted one", async () => {
+  const { splitUnqueue } = await import("../src/autoapply/model.js");
+  const history = {
+    a: { status: "filled", tabOpen: true },
+    b: { status: "needs_you", tabOpen: true },
+    c: { status: "failed", tabOpen: true, submitted: true },
+  };
+  assert.deepEqual(splitUnqueue(history, ["a", "b", "c", "gone"]), { requeue: ["a", "b"], kept: ["c"] });
+  assert.deepEqual(splitUnqueue(history, []), { requeue: [], kept: [] });
+});
