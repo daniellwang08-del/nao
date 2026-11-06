@@ -273,6 +273,40 @@
     true
   );
 
+  // Workable blocks submit ("You have unsaved changes") while its unsaved-changes context reports
+  // any Education / Experience group. Only this world can read that React context: answer with
+  // getGroupsWithUnsavedChanges() in data-af-wb-unsaved on the form ("{}" when clean).
+  function workableUnsavedGroups(form) {
+    let f = null;
+    try {
+      const k = Object.keys(form).find((x) => x.startsWith("__reactFiber"));
+      f = k ? form[k] : null;
+    } catch {}
+    for (let i = 0; f && i < 200; i++) {
+      const v = f.memoizedProps && f.memoizedProps.value;
+      if (v && typeof v.getGroupsWithUnsavedChanges === "function") return v.getGroupsWithUnsavedChanges() || {};
+      f = f.return;
+    }
+    return null;
+  }
+
+  document.addEventListener(
+    "__af_wb_unsaved",
+    (e) => {
+      const form = e.target;
+      if (!form || form.nodeType !== 1) return;
+      let out = "unknown";
+      try {
+        const groups = workableUnsavedGroups(form);
+        if (groups) out = JSON.stringify(groups);
+      } catch {}
+      try {
+        form.setAttribute("data-af-wb-unsaved", out);
+      } catch {}
+    },
+    true
+  );
+
   document.addEventListener(
     "__af_page_click",
     (e) => {

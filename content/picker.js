@@ -1645,7 +1645,10 @@
       clickButton(save);
       const closed = await wbWait(() => !sec.querySelector('[data-ui="editor"]'), 4000, 100);
       if (closed) {
-        await wbDelay(150);
+        // Workable reports "no unsaved changes" for this entry through a 200 ms debounce, and
+        // merges each report onto the state it last rendered with. Let that report land before
+        // the next editor opens and starts reporting, or the saved entry can stay flagged.
+        await wbDelay(WB_SETTLE_MS);
         return true;
       }
     }
@@ -1662,6 +1665,58 @@
     if (!cancel) return false;
     clickButton(cancel);
     return wbWait(() => !sec.querySelector('[data-ui="editor"]'), 3000, 100);
+  }
+
+  const WB_SETTLE_MS = 450;
+
+  // Workable's own unsaved-changes answer, read in the page world by page-bridge.js.
+  // Returns {} when clean, {education: true, experience: true} for flagged groups, or null when
+  // it cannot be read (no bridge / older Workable form).
+  function wbUnsavedGroups() {
+    const form = document.querySelector('form[data-ui="application-form"]');
+    if (!form) return null;
+    try {
+      form.removeAttribute("data-af-wb-unsaved");
+      form.dispatchEvent(new CustomEvent("__af_wb_unsaved", { bubbles: true }));
+      const raw = form.getAttribute("data-af-wb-unsaved");
+      if (!raw || raw === "unknown") return null;
+      return JSON.parse(raw) || {};
+    } catch {
+      return null;
+    }
+  }
+
+  // Submit is refused while any Education / Experience group still reports unsaved changes, even
+  // when every entry shows as saved. Clear it the way a person does: reopen each saved entry of a
+  // flagged group and press Update without changing anything (the editor then reports "no
+  // changes"), one at a time with the debounce settled, and check again.
+  async function wbRepairUnsaved() {
+    await wbDelay(WB_SETTLE_MS);
+    const before = wbUnsavedGroups();
+    if (!before) return { checked: false };
+    const flagged = Object.keys(before).filter((k) => before[k]);
+    for (let round = 0; round < 2 && flagged.length; round++) {
+      for (const sectionUi of flagged) {
+        const sec = wbSection(sectionUi);
+        if (!sec) continue;
+        const count = sec.querySelectorAll('ul li [data-ui="group"]').length;
+        for (let i = 0; i < count; i++) {
+          if (wbEditor(sectionUi)) await wbSaveEditor(sectionUi);
+          const groups = sec.querySelectorAll('ul li [data-ui="group"]');
+          const edit = groups[i] && groups[i].closest("li") && groups[i].closest("li").querySelector('[data-ui="edit-section"]');
+          if (!edit) continue;
+          clickButton(edit);
+          if (!(await wbWait(() => wbEditor(sectionUi), 3000, 80))) continue;
+          await wbDelay(150);
+          await wbSaveEditor(sectionUi);
+        }
+      }
+      const now = wbUnsavedGroups() || {};
+      flagged.splice(0, flagged.length, ...Object.keys(now).filter((k) => now[k]));
+    }
+    const after = wbUnsavedGroups();
+    console.log("[autofill] WB unsaved-changes check", { before, after });
+    return { checked: true, before, after, clean: !!after && !Object.keys(after).some((k) => after[k]) };
   }
 
   /** No edu/exp editor may stay open when the prep hands the form back. */
@@ -1886,8 +1941,14 @@
     } catch (err) {
       console.warn("[autofill] WB closing editors threw", err && err.message);
     }
-    console.log("[autofill] WB prep done", { filledExp, filledEdu, filledAddress });
-    return { filledExp, filledEdu, filledAddress };
+    let unsaved = null;
+    try {
+      unsaved = await wbRepairUnsaved();
+    } catch (err) {
+      console.warn("[autofill] WB unsaved-changes repair threw", err && err.message);
+    }
+    console.log("[autofill] WB prep done", { filledExp, filledEdu, filledAddress, unsaved });
+    return { filledExp, filledEdu, filledAddress, unsaved };
   }
 
   // ── SmartRecruiters multi-page navigation ─────────────────────────────────
@@ -2418,6 +2479,21 @@
       }).then((res) => {
         try {
           sendResponse({ ok: true, ...res });
+        } catch {}
+      });
+      return true;
+    }
+    // Workable: last step of a run, nothing may leave Education / Experience reporting unsaved
+    // changes (the form then refuses to submit).
+    if (msg.type === "AF_WB_SETTLE") {
+      const isWb = !!(AF.workable && AF.workable.isWorkableApplicationPage && AF.workable.isWorkableApplicationPage());
+      if (!isWb) return false;
+      runExclusive(async () => {
+        await wbCloseOpenEditors();
+        return wbRepairUnsaved();
+      }).then((res) => {
+        try {
+          sendResponse({ ok: true, ...(res || {}) });
         } catch {}
       });
       return true;

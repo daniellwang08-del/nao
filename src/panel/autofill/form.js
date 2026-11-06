@@ -1256,6 +1256,18 @@ async function fillCurrentPage(tabId, eng, ctx, isFirstPage) {
   if (isBreezy && breezyResumePending) {
     ctx.breezyResumePending = breezyResumePending;
   }
+  // Workable refuses to submit while an Education / Experience entry still reports unsaved changes
+  // ("You have unsaved changes"), even when every entry shows as saved. Check Workable's own state
+  // last and clear it the way a person would (reopen + Update), so the form is ready to submit.
+  if (isWorkable && isFirstPage) {
+    setAutofill({ runStatus: "Checking your work and education entries…" });
+    try {
+      const res = await tabSend(tabId, { type: "AF_WB_SETTLE" });
+      debugLog("[autofill] Workable unsaved-changes check:", res);
+    } catch {
+      /* the check is best-effort; the fill itself is done */
+    }
+  }
 
   return lastSpecs;
 }
