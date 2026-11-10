@@ -1029,6 +1029,27 @@
   font-weight: 600;
 }
 
+.aa-chance-tag {
+  margin-right: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  border: 1px solid var(--border-strong);
+  color: var(--muted-foreground);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 600;
+}
+
+.aa-chance-tag.is-high {
+  border-color: color-mix(in oklch, var(--match-strong) 45%, transparent);
+  color: var(--match-strong);
+}
+
+.aa-chance-tag.is-medium {
+  border-color: color-mix(in oklch, var(--match-good) 45%, transparent);
+  color: var(--match-good);
+}
+
 .aa-log {
   display: flex;
   flex-direction: column;

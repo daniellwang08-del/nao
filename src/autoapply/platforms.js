@@ -132,6 +132,9 @@ export function rankJobs(rows, { allowed, skip = new Set() } = {}) {
       platform,
       tier,
       score,
+      // Server estimate of the chance this application gets an interview (0-1) and its tier.
+      likelihood: j.interview_likelihood != null ? Number(j.interview_likelihood) : 0,
+      likelihoodTier: j.likelihood_tier || null,
       title: (j.title || "").trim() || "Untitled role",
       company: (j.company || "").trim(),
       createdAt: j.created_at ? Date.parse(j.created_at) || 0 : 0,

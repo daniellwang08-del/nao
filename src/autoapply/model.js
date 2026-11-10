@@ -4,10 +4,20 @@
 import { EASE_TIER, NEEDS_ACCOUNT } from "./platforms.js";
 
 export const ORDERS = [
+  {
+    value: "callback",
+    label: "Best interview chance first",
+    hint: "Jobs most likely to get an interview first (hybrid and onsite near you, fresh postings, sites that reply); easier sites break ties.",
+  },
   { value: "ease", label: "Easiest sites first", hint: "Fewest steps and highest success rate first." },
   { value: "match", label: "Best match first", hint: "Highest match score first, on any enabled site." },
   { value: "newest", label: "Newest first", hint: "Most recently added jobs first." },
 ];
+
+/** "High chance" label for a queued job's interview likelihood tier, or null. */
+export function chanceLabel(tier) {
+  return { high: "High chance", medium: "Medium chance", low: "Low chance" }[tier] || null;
+}
 
 export const STAGES = [
   { id: "open", label: "Open" },
@@ -43,10 +53,15 @@ export function startOfDay(now = Date.now()) {
  * Ranked queue -> the order and filter the user picked. Never mutates.
  * Pinned jobs come first; jobs set aside for later come after all others.
  */
-export function arrangeQueue(queue, { order = "ease", minScore = 0, pinned = [], later = new Set() } = {}) {
+const CHANCE_RANK = { high: 0, medium: 1, low: 2 };
+
+export function arrangeQueue(queue, { order = "callback", minScore = 0, pinned = [], later = new Set() } = {}) {
   const pins = new Map(pinned.map((id, i) => [id, i]));
   const kept = queue.filter((q) => pins.has(q.id) || !minScore || (q.score != null && q.score >= minScore));
+  const chance = (q) => CHANCE_RANK[q.likelihoodTier] ?? 3;
   const by = {
+    callback: (a, b) =>
+      chance(a) - chance(b) || a.tier - b.tier || (b.likelihood || 0) - (a.likelihood || 0) || b.score - a.score,
     ease: (a, b) => a.tier - b.tier || b.score - a.score,
     match: (a, b) => b.score - a.score || a.tier - b.tier,
     newest: (a, b) => (b.createdAt || 0) - (a.createdAt || 0) || a.tier - b.tier,

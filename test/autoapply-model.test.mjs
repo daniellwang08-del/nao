@@ -138,3 +138,18 @@ test("unqueue sends waiting jobs back to the queue, never an already submitted o
   assert.deepEqual(splitUnqueue(history, ["a", "b", "c", "gone"]), { requeue: ["a", "b"], kept: ["c"] });
   assert.deepEqual(splitUnqueue(history, []), { requeue: [], kept: [] });
 });
+
+test("arrangeQueue by interview chance: tier first, then easier sites, then likelihood", async () => {
+  const { chanceLabel } = await import("../src/autoapply/model.js");
+  const queue = [
+    q("lowEasy", 1, 95, { likelihoodTier: "low", likelihood: 0.004 }),
+    q("highHard", 4, 60, { likelihoodTier: "high", likelihood: 0.03 }),
+    q("highEasy", 1, 50, { likelihoodTier: "high", likelihood: 0.026 }),
+    q("medium", 1, 99, { likelihoodTier: "medium", likelihood: 0.012 }),
+    q("unknown", 1, 99),
+  ];
+  assert.deepEqual(arrangeQueue(queue, { order: "callback" }).map((j) => j.id), ["highEasy", "highHard", "medium", "lowEasy", "unknown"]);
+  assert.deepEqual(arrangeQueue(queue).map((j) => j.id)[0], "highEasy", "interview chance is the default order");
+  assert.equal(chanceLabel("high"), "High chance");
+  assert.equal(chanceLabel(null), null);
+});

@@ -17,6 +17,7 @@ import {
   RETRYABLE,
   closedWithoutSubmit,
   arrangeQueue,
+  chanceLabel,
   easeLabel,
   easeTier,
   filterHistory,
@@ -44,7 +45,7 @@ const ALL_PLATFORMS = [...FILL_PLATFORMS, ...NEEDS_ACCOUNT, "board"].sort((a, b)
 const RECOMMENDED_FILL = ALL_PLATFORMS.filter((p) => p !== "icims");
 // The site default before every site but iCIMS was on.
 const OLD_DEFAULT_FILL = FILL_PLATFORMS.filter((p) => p !== "generic");
-const SETTINGS_VERSION = 2;
+const SETTINGS_VERSION = 3;
 
 const DEFAULT_SETTINGS = {
   version: SETTINGS_VERSION,
@@ -54,7 +55,7 @@ const DEFAULT_SETTINGS = {
   closeOnSuccess: true,
   platforms: RECOMMENDED_FILL,
   submitPlatforms: DEFAULT_SUBMIT_PLATFORMS,
-  order: "ease",
+  order: "callback",
   minScore: 0,
   perCompany: 0,
   runTimeoutMin: 14,
@@ -149,7 +150,9 @@ function loadedSettings(saved) {
     Array.isArray(kept.platforms) &&
     kept.platforms.length === OLD_DEFAULT_FILL.length &&
     OLD_DEFAULT_FILL.every((p) => kept.platforms.includes(p));
-  if ((kept.version || 1) < SETTINGS_VERSION && untouched) settings.platforms = RECOMMENDED_FILL;
+  if ((kept.version || 1) < 2 && untouched) settings.platforms = RECOMMENDED_FILL;
+  // Version 3 made interview chance the default order; move the old default with it.
+  if ((kept.version || 1) < 3 && (kept.order || "ease") === "ease") settings.order = "callback";
   return settings;
 }
 
@@ -1003,6 +1006,7 @@ function RunSettings({ s }) {
           label="Queue order"
           value=${st.order}
           options=${[
+            { value: "callback", label: "Interview chance" },
             { value: "ease", label: "Easiest" },
             { value: "match", label: "Best match" },
             { value: "newest", label: "Newest" },
@@ -1206,7 +1210,7 @@ function Queue({ s }) {
               <span class="aa-td aa-td-num">${pinned.has(j.id) ? html`<${Icon} name="pin" size=${12} />` : i + 1}</span>
               <span class="aa-td aa-td-main">
                 <strong title=${j.title}>${j.title}</strong>
-                <span>${later.has(j.id) && !pinned.has(j.id) ? html`<em class="aa-later-tag">Later</em>` : null}${j.company || "Company not listed"}</span>
+                <span>${later.has(j.id) && !pinned.has(j.id) ? html`<em class="aa-later-tag">Later</em>` : null}${chanceLabel(j.likelihoodTier) ? html`<em class=${`aa-chance-tag is-${j.likelihoodTier}`} title="Estimated chance of an interview">${chanceLabel(j.likelihoodTier)}</em>` : null}${j.company || "Company not listed"}</span>
               </span>
               <span class="aa-td"><${PlatformChip} platform=${j.platform} /></span>
               <span class="aa-td"><${Score} value=${j.score >= 0 ? j.score : null} /></span>
