@@ -248,6 +248,10 @@ export const getScraperStats = (timezone) => apiFetch(`/scraper/stats${qs({ time
 // ── applications ─────────────────────────────────────────────────────────────
 
 export const listSessions = (status, limit = 100) => apiFetch(`/assistant/sessions${qs({ status, limit })}`);
+/** The employer's application page a board job (Adzuna, Jobright) led to in this browser. */
+export const reportApplyUrl = (jobId, url) =>
+  apiFetch(`/jobs/${encodeURIComponent(jobId)}/apply-url`, { method: "POST", body: { url } });
+
 export const openSession = (jobId, { fresh = true } = {}) =>
   apiFetch(`/assistant/sessions/${encodeURIComponent(jobId)}/open`, { method: "POST", body: { fresh } });
 export const getSessionDocs = (jobId) => apiFetch(`/assistant/sessions/${encodeURIComponent(jobId)}/docs`);

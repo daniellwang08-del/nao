@@ -53,3 +53,17 @@ test("listing URLs map to the application form", () => {
   assert.equal(applyPageUrl("manatal", "https://www.careers-page.com/24-mag/job/V6768V8R"), "https://www.careers-page.com/24-mag/job/V6768V8R/apply");
   assert.equal(applyPageUrl("manatal", "https://www.careers-page.com/24-mag/job/V6768V8R/apply"), "https://www.careers-page.com/24-mag/job/V6768V8R/apply");
 });
+
+test("board jobs apply on the employer page once NAO knows it", async () => {
+  const { rankJobs } = await import("../src/autoapply/platforms.js");
+  const rows = [
+    { id: "a", source_url: "https://www.adzuna.com/details/123", apply_url: "https://job-boards.greenhouse.io/acme/jobs/1", title: "Engineer" },
+    { id: "b", source_url: "https://jobright.ai/jobs/info/6af3835010c7aed77861b407", apply_url: null, apply_via: "Jobright", title: "Engineer" },
+  ];
+  const out = rankJobs(rows, { allowed: new Set(["greenhouse", "board"]) });
+  const byId = Object.fromEntries(out.map((q) => [q.id, q]));
+  assert.equal(byId.a.platform, "greenhouse");
+  assert.equal(byId.a.url, "https://job-boards.greenhouse.io/acme/jobs/1");
+  assert.equal(byId.b.platform, "board");
+  assert.equal(byId.b.url, "https://jobright.ai/jobs/info/6af3835010c7aed77861b407");
+});

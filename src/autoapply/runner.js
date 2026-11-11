@@ -330,6 +330,27 @@ async function boot() {
   });
 }
 
+const onBoard = (url) => AGGREGATOR_HOSTS.some((h) => hostOf(url).endsWith(h));
+
+/**
+ * A board job (Adzuna, Jobright) whose employer page NAO does not know yet: follow the board's Apply in this
+ * browser (the user's own session) to the employer's site, and tell NAO where it led so every later apply
+ * goes straight there. Other boards, and a board that will not let us through, are left to the user.
+ */
+async function leaveBoard(tab, job) {
+  const via = job.snapshot && job.snapshot.apply_via;
+  if (!via) throw needsYou("This is a job board listing. Open the employer's application from it.");
+  step(`Opening the employer's application from ${via}…`);
+  const reached = await reachApplicationForm(tab.id, { onStep: step, waitMs: 25_000, focus: wakeTab });
+  if (!reached.tab) throw new Stop("failed", "The application tab was closed.");
+  if (reached.gone) throw postingGone();
+  if (onBoard(reached.tab.url)) {
+    throw needsYou(`${via} did not open the employer's application. Open it from the page (signing in to ${via} may be needed).`);
+  }
+  await api.reportApplyUrl(job.job_id, reached.tab.url).catch(() => {});
+  return reached.tab;
+}
+
 async function run(cfg) {
   await boot();
   step("Opening the job…");
@@ -352,9 +373,7 @@ async function run(cfg) {
   let platform = detectPlatform({ pageUrl: tab.url });
   const better = applyPageUrl(platform, tab.url || "");
   if (better && better !== tab.url) tab = await navigate(tab.id, better);
-  if (AGGREGATOR_HOSTS.some((h) => hostOf(tab.url).endsWith(h))) {
-    throw needsYou("This is a job board listing. Open the employer's application from it.");
-  }
+  if (onBoard(tab.url)) tab = await leaveBoard(tab, job);
 
   // Description pages hide the form behind "Apply"; fill only once it shows.
   // JobDiva opens its own Quick Apply during the fill.
@@ -379,7 +398,7 @@ async function run(cfg) {
   }
   platform = detectPlatform({ pageUrl: tab.url });
   report({ platform });
-  if (AGGREGATOR_HOSTS.some((h) => hostOf(tab.url).endsWith(h))) {
+  if (onBoard(tab.url)) {
     throw needsYou("This is a job board listing. Open the employer's application from it.");
   }
   if (NEEDS_ACCOUNT.has(platform)) throw needsYou(`${platform} needs an account. Sign in and finish the application.`);

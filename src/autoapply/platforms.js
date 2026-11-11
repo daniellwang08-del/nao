@@ -119,7 +119,8 @@ export function rankJobs(rows, { allowed, skip = new Set() } = {}) {
   for (const j of rows || []) {
     const id = String(j.id || j.job_id || "");
     if (!id || skip.has(id) || j.applied_at) continue;
-    const url = j.source_url || j.normalized_url || j.url || "";
+    // Board jobs (Adzuna, Jobright): the employer's application page once known (apply_url).
+    const url = j.apply_url || j.source_url || j.normalized_url || j.url || "";
     if (!url) continue;
     const platform = platformOfUrl(url);
     if (NEEDS_ACCOUNT.has(platform) && !(allowed && allowed.has(platform))) continue;
