@@ -252,6 +252,10 @@ export const listSessions = (status, limit = 100) => apiFetch(`/assistant/sessio
 export const reportApplyUrl = (jobId, url) =>
   apiFetch(`/jobs/${encodeURIComponent(jobId)}/apply-url`, { method: "POST", body: { url } });
 
+/** The user clicked Apply on a board job page (Adzuna, Jobright) and landed on the employer's page. */
+export const reportApplyUrlFromBoard = (boardUrl, url) =>
+  apiFetch("/jobs/apply-url/from-board", { method: "POST", body: { board_url: boardUrl, url } });
+
 export const openSession = (jobId, { fresh = true } = {}) =>
   apiFetch(`/assistant/sessions/${encodeURIComponent(jobId)}/open`, { method: "POST", body: { fresh } });
 export const getSessionDocs = (jobId) => apiFetch(`/assistant/sessions/${encodeURIComponent(jobId)}/docs`);

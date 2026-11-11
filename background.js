@@ -7,6 +7,7 @@ import { attachMessageHandlers as attachJobSiteConnectHandlers } from "./src/job
 import { attachBrowserSync } from "./src/jobSiteBrowserSync.js";
 import * as api from "./src/api.js";
 import { closedWithoutSubmit } from "./src/autoapply/model.js";
+import { attachBoardApplyWatch } from "./src/boardApplyWatch.js";
 
 const BRIDGE_FILE = "content/webapp-bridge.js";
 
@@ -85,6 +86,9 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.runtime.onStartup.addListener(() => {
   void injectBridgeIntoOpenTabs();
 });
+
+// Adzuna/Jobright Apply clicks in this browser teach NAO the employer's application page.
+attachBoardApplyWatch({ report: (boardUrl, url) => api.reportApplyUrlFromBoard(boardUrl, url) });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === "complete" && tab.url && isDashboardUrl(tab.url)) {
