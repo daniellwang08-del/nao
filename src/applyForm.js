@@ -207,6 +207,15 @@ export function probeApplyPage(rules, act) {
     if (upload || contact) ready = true;
   }
   if (ready) account = false;
+  // iCIMS opens every application with "Enter Your Information" (email, then Next). It is a step of the
+  // application, not an account wall: the iCIMS engine passes it.
+  let gate = null;
+  try {
+    if (!ready && document.getElementById("enterEmailForm")) gate = "icims-email";
+  } catch {
+    /* no getElementById (tests) */
+  }
+  if (gate) account = false;
 
   // Only a page without a form can be a dead posting. Headings and alerts are
   // read in full; body text only on a sparse page, where a description
@@ -227,7 +236,8 @@ export function probeApplyPage(rules, act) {
     }
   }
   const base = account ? { ready, fields, gone, account } : { ready, fields, gone };
-  if (ready || gone || !act) return base;
+  if (gate) base.gate = gate;
+  if (ready || gone || gate || !act) return base;
 
   const applyText = new RegExp(rules.applyText);
   const notApply = new RegExp(rules.notApplyText);
@@ -248,7 +258,10 @@ export function probeApplyPage(rules, act) {
     .sort((a, b) => b.score - a.score);
   const hit = candidates[0];
   if (!hit) return base;
-  const href = hit.el.tagName === "A" ? attr(hit.el, "href") : "";
+  if (act === "peek") return { ...base, candidate: { label: hit.t, score: hit.score } };
+  // In a sub-frame (iCIMS renders the job in #icims_content_iframe) the link is clicked in place.
+  const framed = typeof window !== "undefined" && window.top !== window;
+  const href = hit.el.tagName === "A" && !framed ? attr(hit.el, "href") : "";
   if (href && !/^(#|javascript:|mailto:)/i.test(href)) {
     try {
       const url = new URL(href, location.href);
@@ -288,6 +301,35 @@ async function probe(tabId, act) {
   }
 }
 
+/** Act on the frame whose Apply control scores best (the top frame wins ties): job sites such as iCIMS
+ *  render the posting, and its Apply link, inside an iframe. */
+async function act(tabId) {
+  let peeks = [];
+  try {
+    peeks = await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: probeApplyPage, args: [RULES, "peek"] });
+  } catch {
+    return null;
+  }
+  const seen = (peeks || []).filter((r) => r && r.result);
+  const done = seen.find((r) => r.result.ready || r.result.gone || r.result.gate);
+  if (done) return done.result;
+  const account = seen.some((r) => r.result.account);
+  let best = null;
+  for (const r of seen) {
+    const c = r.result.candidate;
+    if (!c) continue;
+    if (!best || c.score > best.c.score || (c.score === best.c.score && r.frameId === 0)) best = { frameId: r.frameId, c };
+  }
+  if (!best) return { ready: false, fields: 0, gone: false, ...(account ? { account } : {}) };
+  try {
+    const [res] = await chrome.scripting.executeScript({ target: { tabId, frameIds: [best.frameId] }, func: probeApplyPage, args: [RULES, true] });
+    const out = res && res.result;
+    return out ? { ...out, ...(account ? { account } : {}) } : null;
+  } catch {
+    return null;
+  }
+}
+
 async function settled(tabId, timeoutMs) {
   const end = Date.now() + timeoutMs;
   while (Date.now() < end) {
@@ -308,7 +350,8 @@ const RENDER_WAIT_MS = 8000;
  * Make sure the tab shows an application form, clicking through "Apply" up to
  * a few times. A click that opens a new tab is folded back into this one.
  * `focus(tabId)` brings a background tab to the front when the form is slow.
- * Returns { ready, gone, account, steps: [labels clicked], tab }; `gone` means
+ * Returns { ready, gone, account, gate, steps: [labels clicked], tab }; `gate` names a known pre-form step
+ * the platform engine passes itself (iCIMS "Enter Your Information"); `gone` means
  * the posting itself is expired or removed, `account` that the page asks to
  * sign in or create an account instead of showing an application.
  */
@@ -320,6 +363,8 @@ export async function reachApplicationForm(tabId, { onStep = () => {}, waitMs = 
     account = frames.some((f) => f.account);
     if (frames.some((f) => f.ready)) return { ready: true, gone: false, steps, tab: await chrome.tabs.get(tabId) };
     if (frames.some((f) => f.gone)) return { ready: false, gone: true, steps, tab: await chrome.tabs.get(tabId).catch(() => null) };
+    const gated = frames.find((f) => f.gate);
+    if (gated) return { ready: false, gone: false, gate: gated.gate, steps, tab: await chrome.tabs.get(tabId).catch(() => null) };
     if (hop === HOPS) break;
 
     const opened = [];
@@ -335,7 +380,7 @@ export async function reachApplicationForm(tabId, { onStep = () => {}, waitMs = 
       const renderEnd = renderStart + (hop === 0 ? RENDER_WAIT_MS : 0);
       let shown = false;
       for (;;) {
-        [action] = await probe(tabId, true);
+        action = await act(tabId);
         if (action && (action.ready || action.gone || action.href || action.clicked)) break;
         if (Date.now() >= renderEnd) break;
         if (focus && !shown && Date.now() - renderStart >= FOCUS_AFTER_MS) {
@@ -348,6 +393,7 @@ export async function reachApplicationForm(tabId, { onStep = () => {}, waitMs = 
       setTimeout(() => chrome.tabs.onCreated.removeListener(onCreated), 3000);
     }
     if (action && action.ready) return { ready: true, gone: false, steps, tab: await chrome.tabs.get(tabId) };
+    if (action && action.gate) return { ready: false, gone: false, gate: action.gate, steps, tab: await chrome.tabs.get(tabId) };
     if (action && action.gone) return { ready: false, gone: true, steps, tab: await chrome.tabs.get(tabId).catch(() => null) };
     if (action && action.account) account = true;
     if (!action || !(action.href || action.clicked)) break;
@@ -384,7 +430,7 @@ export async function reachApplicationForm(tabId, { onStep = () => {}, waitMs = 
       if (!tab) return { ready: false, gone: false, steps, tab: null };
       if (tab.status !== "complete") continue;
       const now = await probe(tabId, false);
-      if (now.some((f) => f.ready || f.gone || f.account)) break;
+      if (now.some((f) => f.ready || f.gone || f.account || f.gate)) break;
     }
   }
   const tab = await chrome.tabs.get(tabId).catch(() => null);

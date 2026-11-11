@@ -455,9 +455,18 @@ function chromeWith(script) {
   globalThis.chrome = {
     scripting: {
       async executeScript({ args }) {
+        // act() peeks every frame first: a scripted click is announced as a candidate in the top frame and
+        // stays queued for the act call that follows; anything else is the act result itself.
+        if (args[1] === "peek") {
+          const next = script[0];
+          if (next && (next.clicked || next.href)) return [{ frameId: 0, result: { ready: false, candidate: { label: next.label, score: 2 } } }];
+          calls.push("act"); // an attempt that found nothing to click
+          script.shift();
+          return next ? [{ frameId: 0, result: next }] : [];
+        }
         calls.push(args[1] ? "act" : "probe");
         const next = script.shift();
-        return next ? [{ result: next }] : [];
+        return next ? [{ frameId: 0, result: next }] : [];
       },
     },
     tabs: {
@@ -558,4 +567,72 @@ test("closing a waiting tab moves the job to apply later", () => {
   for (const status of ["applied", "invalid", "later", "skipped"]) {
     assert.equal(closedWithoutSubmit({ status, tabOpen: true }), null, status);
   }
+});
+
+// ── iCIMS (live markup, careers-mercuryinsurance.icims.com, 2026-11-10) ─────
+
+test("iCIMS Enter Your Information is the email gate, not an account wall", () => {
+  const form = fakeForm({ id: "enterEmailForm", className: "iCIMS_SignIn", text: "Email Next" });
+  page({ fields: [input("css_loginName", { type: "email", id: "email", autocomplete: "email" }, { form })], href: "https://careers-acme.icims.com/jobs/1/x/login?in_iframe=1" });
+  globalThis.document.getElementById = (id) => (id === "enterEmailForm" ? form : null);
+  const out = probeApplyPage(RULES, true);
+  assert.equal(out.gate, "icims-email");
+  assert.equal(out.account, undefined);
+  assert.equal(out.ready, false);
+  assert.equal(out.clicked, undefined);
+});
+
+test("peek reports the Apply candidate without clicking it", () => {
+  const apply = el("a", { text: "Apply", attrs: { href: "https://careers-acme.icims.com/jobs/1/x/job?mode=apply&apply=yes&in_iframe=1", class: "iCIMS_ApplyOnlineButton iCIMS_PrimaryButton" } });
+  page({ controls: [apply], href: "https://careers-acme.icims.com/jobs/1/x/job?in_iframe=1" });
+  const out = probeApplyPage(RULES, "peek");
+  assert.deepEqual(out.candidate, { label: "apply", score: 2 });
+  assert.equal(apply.clicks, 0);
+});
+
+test("inside an iframe Apply is clicked in place, never navigating the whole tab to the frame's URL", () => {
+  const apply = el("a", { text: "Apply", attrs: { href: "https://careers-acme.icims.com/jobs/1/x/job?mode=apply&apply=yes&in_iframe=1" } });
+  page({ controls: [apply], href: "https://careers-acme.icims.com/jobs/1/x/job?in_iframe=1" });
+  globalThis.window = { top: {} };
+  try {
+    const out = probeApplyPage(RULES, true);
+    assert.equal(out.clicked, true);
+    assert.equal(out.href, undefined);
+    assert.equal(apply.clicks, 1);
+  } finally {
+    delete globalThis.window;
+  }
+});
+
+test("reach acts in the frame that holds Apply (the iCIMS job iframe), then stops at the email gate", async () => {
+  const acted = [];
+  let hop = 0;
+  globalThis.chrome = {
+    scripting: {
+      async executeScript({ target, args }) {
+        if (args[1] === "peek") {
+          // Top frame: no Apply. Frame 3 (#icims_content_iframe): the Apply link.
+          return [{ frameId: 0, result: { ready: false } }, { frameId: 3, result: { ready: false, candidate: { label: "apply", score: 2 } } }];
+        }
+        if (args[1] === true) {
+          acted.push(target.frameIds);
+          return [{ frameId: 3, result: { ready: false, clicked: true, label: "apply" } }];
+        }
+        hop += 1;
+        // Before the click: the description. After it: the email gate in the iframe.
+        return hop === 1 ? [{ frameId: 0, result: { ready: false } }] : [{ frameId: 0, result: { ready: false } }, { frameId: 3, result: { ready: false, gate: "icims-email" } }];
+      },
+    },
+    tabs: {
+      get: async (id) => ({ id, url: "https://careers-acme.icims.com/jobs/1/x/job", status: "complete" }),
+      update: async () => {},
+      remove: async () => {},
+      onCreated: { addListener() {}, removeListener() {} },
+    },
+  };
+  const out = await reachApplicationForm(1, { waitMs: 3000 });
+  assert.deepEqual(acted, [[3]]);
+  assert.equal(out.gate, "icims-email");
+  assert.equal(out.ready, false);
+  assert.deepEqual(out.steps, ["apply"]);
 });

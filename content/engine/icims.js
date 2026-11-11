@@ -49,7 +49,7 @@
     try {
       pageCache =
         isIcimsHost() ||
-        !!document.querySelector(".iCIMS_ProfileFormTable, .iCIMS_CenteredPageContent, #cp_form_submit_i");
+        !!document.querySelector(".iCIMS_ProfileFormTable, .iCIMS_CenteredPageContent, #cp_form_submit_i, #enterEmailForm");
     } catch {
       pageCache = false;
     }
@@ -680,8 +680,19 @@
       const h = document.querySelector(".iCIMS_CenteredPageContent h2, .iCIMS_MainSection h2, h2");
       heading = clean(h && h.textContent);
     } catch {}
+    // A returning candidate's password sign-in (not the profile's "Create a login"
+    // block): the candidate signs in themselves.
+    let signIn = false;
+    try {
+      signIn =
+        !!document.querySelector('input[type="password"]') &&
+        !document.querySelector(".iCIMS_ProfileFormTable") &&
+        !needsCredentials();
+    } catch {}
     return {
       icims: true,
+      gate: !!emailGateForm(),
+      signIn,
       step: step.current,
       total: step.total,
       stepsPresent: step.present,
@@ -709,6 +720,264 @@
     } catch {
       return false;
     }
+  }
+
+
+  // ── email gate ("Enter Your Information") ──────────────────────────────────
+  //
+  // Every application opens with this step (seen live 2026-11-10 on
+  // careers-mercuryinsurance.icims.com, .../login?in_iframe=1):
+  //
+  //   <form id="enterEmailForm" class="iCIMS_SignIn" method="post"
+  //         action=".../login?step=email&in_iframe=1&hashed=...">
+  //     <label for="email">Email</label>
+  //     <input type="email" autocomplete="email" id="email" name="css_loginName">
+  //     <input id="enterEmailSubmitButton" type="submit" class="iCIMS_PrimaryButton" value="Next">
+  //   + an INVISIBLE hCaptcha whose callback calls form.submit().
+  //
+  // Next is clicked like a user would; hCaptcha decides on its own. When it
+  // shows a challenge the candidate solves it - nothing here touches the check.
+  function emailGateForm() {
+    try {
+      return document.getElementById("enterEmailForm");
+    } catch {
+      return null;
+    }
+  }
+
+  function emailGateInput(form) {
+    try {
+      return form.querySelector('input[type="email"], #email, input[name="css_loginName"]');
+    } catch {
+      return null;
+    }
+  }
+
+  // A challenge the candidate can see. hCaptcha preloads its "hCaptcha challenge"
+  // frame hidden (visibility:hidden inside an opacity:0 box at top:-10000px, seen
+  // live), so size alone is not enough: it must be visible, opaque and on screen.
+  function captchaChallengeShown() {
+    try {
+      for (const f of document.querySelectorAll('iframe[src*="hcaptcha"]')) {
+        if (!/challenge/i.test(f.getAttribute("title") || "")) continue;
+        const r = f.getBoundingClientRect();
+        if (r.width < 60 || r.height < 60 || r.bottom <= 0 || r.top >= (window.innerHeight || 0)) continue;
+        let shown = true;
+        for (let n = f; n && n !== document.documentElement; n = n.parentElement) {
+          const cs = getComputedStyle(n);
+          if (cs.visibility === "hidden" || cs.display === "none" || Number(cs.opacity) === 0) {
+            shown = false;
+            break;
+          }
+        }
+        if (shown) return true;
+      }
+    } catch {}
+    return false;
+  }
+
+  function emailGateState() {
+    const form = emailGateForm();
+    if (!form) return { gate: false };
+    const input = emailGateInput(form);
+    return { gate: true, email: clean(input && input.value), challenge: captchaChallengeShown() };
+  }
+
+  // Write the email (never over one the candidate typed) and press Next.
+  function submitEmailGate(email) {
+    const form = emailGateForm();
+    const input = form && emailGateInput(form);
+    if (!input) return false;
+    if (!clean(input.value)) {
+      if (!clean(email) || !setField(input, clean(email))) return false;
+    }
+    let btn = null;
+    try {
+      btn = document.getElementById("enterEmailSubmitButton") || form.querySelector('input[type="submit"], button[type="submit"]');
+    } catch {}
+    if (!btn) return false;
+    try {
+      btn.scrollIntoView({ block: "center" });
+    } catch {}
+    try {
+      btn.click();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // ── address, time zone, required work locations ────────────────────────────
+  //
+  // Filled from the profile before extraction, like the phone block. iCIMS' own
+  // resume parser fills City and State from the PDF but leaves Address and Zip
+  // empty (seen on a live profile step), and these are required. They come from
+  // the candidate's confirmed address only; nothing is guessed.
+
+  const US_STATES = {
+    AL: "Alabama", AK: "Alaska", AZ: "Arizona", AR: "Arkansas", CA: "California", CO: "Colorado", CT: "Connecticut",
+    DE: "Delaware", DC: "District of Columbia", FL: "Florida", GA: "Georgia", HI: "Hawaii", ID: "Idaho", IL: "Illinois",
+    IN: "Indiana", IA: "Iowa", KS: "Kansas", KY: "Kentucky", LA: "Louisiana", ME: "Maine", MD: "Maryland",
+    MA: "Massachusetts", MI: "Michigan", MN: "Minnesota", MS: "Mississippi", MO: "Missouri", MT: "Montana",
+    NE: "Nebraska", NV: "Nevada", NH: "New Hampshire", NJ: "New Jersey", NM: "New Mexico", NY: "New York",
+    NC: "North Carolina", ND: "North Dakota", OH: "Ohio", OK: "Oklahoma", OR: "Oregon", PA: "Pennsylvania",
+    RI: "Rhode Island", SC: "South Carolina", SD: "South Dakota", TN: "Tennessee", TX: "Texas", UT: "Utah",
+    VT: "Vermont", VA: "Virginia", WA: "Washington", WV: "West Virginia", WI: "Wisconsin", WY: "Wyoming",
+  };
+  // Zone family per state (states split across zones use the zone most of the state is in).
+  const ZONE_OF = {};
+  for (const s of ["WA", "OR", "CA", "NV"]) ZONE_OF[s] = "Pacific";
+  for (const s of ["MT", "ID", "WY", "UT", "CO", "NM", "AZ"]) ZONE_OF[s] = "Mountain";
+  for (const s of ["ND", "SD", "NE", "KS", "OK", "TX", "MN", "IA", "MO", "AR", "LA", "WI", "IL", "MS", "AL", "TN"]) ZONE_OF[s] = "Central";
+  for (const s of ["ME", "NH", "VT", "MA", "RI", "CT", "NY", "NJ", "PA", "DE", "MD", "DC", "VA", "WV", "NC", "SC", "GA", "FL", "OH", "MI", "IN", "KY"]) ZONE_OF[s] = "Eastern";
+  ZONE_OF.AK = "Alaska";
+  ZONE_OF.HI = "Hawaii";
+
+  function stateCode(value) {
+    const v = clean(value);
+    if (!v) return "";
+    if (/^[A-Za-z]{2}$/.test(v) && US_STATES[v.toUpperCase()]) return v.toUpperCase();
+    const hit = Object.keys(US_STATES).find((k) => normText(US_STATES[k]) === normText(v));
+    return hit || "";
+  }
+
+  function isUnset(el) {
+    if (!el) return false;
+    if (el.tagName === "SELECT") {
+      const a = dropdownAnchorFor(el);
+      if (a && AF.icimsDropdown && AF.icimsDropdown.hasSelection) return !AF.icimsDropdown.hasSelection(a);
+      const v = clean(el.value);
+      return !v || v === "-999";
+    }
+    return !clean(el.value);
+  }
+
+  // Choose an option by its visible text: the AJAX widget through its driver, a
+  // plain <select> by the first option whose text contains `want`.
+  async function choose(el, want) {
+    if (!el || !clean(want)) return false;
+    const a = dropdownAnchorFor(el);
+    if (a && AF.icimsDropdown && AF.icimsDropdown.pickValue) {
+      try {
+        return !!(await AF.icimsDropdown.pickValue(a, want));
+      } catch {
+        return false;
+      }
+    }
+    if (el.tagName !== "SELECT") return setField(el, want);
+    const w = normText(want);
+    const opts = Array.from(el.options || []).filter((o) => clean(o.value) && o.value !== "-999");
+    const opt = opts.find((o) => normText(o.textContent) === w) || opts.find((o) => normText(o.textContent).includes(w));
+    if (!opt) return false;
+    try {
+      el.value = opt.value;
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // Visible-or-widget controls of the profile, each with its row label and group.
+  function profileControls() {
+    const out = [];
+    let nodes = [];
+    try {
+      nodes = Array.from(document.querySelectorAll("input, select, textarea"));
+    } catch {
+      return out;
+    }
+    for (const el of nodes) {
+      const t = (el.type || "").toLowerCase();
+      if (t === "hidden" || t === "file" || t === "submit" || t === "button" || t === "password") continue;
+      if (shouldSkipControl(el) && !(el.tagName === "SELECT" && dropdownAnchorFor(el))) continue;
+      const label = normText(labelCellText(el));
+      if (!label) continue;
+      out.push({ el, label, group: normText(collectionNameFor(el)) });
+    }
+    return out;
+  }
+
+  function findIn(controls, groupRe, labelRe) {
+    return controls.find((c) => groupRe.test(c.group) && labelRe.test(c.label)) || null;
+  }
+
+  async function fillAddress(addr) {
+    const out = { filled: 0, present: 0 };
+    const a = addr || {};
+    const ctl = profileControls();
+    const G = /address/;
+    const fields = {
+      country: findIn(ctl, G, /^country/),
+      state: findIn(ctl, G, /^state|province/),
+      line1: findIn(ctl, G, /^(street )?address( line)?( 1)?$|^street$/),
+      line2: findIn(ctl, G, /^address( line)? 2$|^apt|suite/),
+      city: findIn(ctl, G, /^city|town/),
+      zip: findIn(ctl, G, /zip|postal/),
+    };
+    out.present = Object.values(fields).filter(Boolean).length;
+    if (!out.present) return out;
+    // Country first: State/Province lists "No Results" until Country is answered.
+    if (fields.country && isUnset(fields.country.el) && clean(a.country) && (await choose(fields.country.el, a.country))) out.filled++;
+    const code = stateCode(a.state);
+    const stateName = code ? US_STATES[code] : clean(a.state);
+    if (fields.state && isUnset(fields.state.el) && stateName && !parentUnanswered(fields.state.el)) {
+      if (await choose(fields.state.el, stateName)) out.filled++;
+    }
+    for (const [key, value] of [["line1", a.line1], ["line2", a.line2], ["city", a.city], ["zip", a.postalCode]]) {
+      const f = fields[key];
+      if (f && isUnset(f.el) && clean(value) && setField(f.el, clean(value))) out.filled++;
+    }
+    return out;
+  }
+
+  async function fillTimeZone(addr) {
+    const tz = profileControls().find((c) => /time ?zone/.test(c.label));
+    if (!tz || !isUnset(tz.el)) return { present: !!tz, filled: 0 };
+    const zone = ZONE_OF[stateCode((addr || {}).state)];
+    if (!zone) return { present: true, filled: 0 };
+    return { present: true, filled: (await choose(tz.el, zone)) ? 1 : 0 };
+  }
+
+  // Work-experience City / State that the form REQUIRES and the parser left empty:
+  // the role's own location, else the candidate's confirmed home location (the
+  // candidate's rule: a required location is never left blank). Optional ones
+  // stay empty - inventing an office is a common source of wrong fills.
+  async function fillRequiredWorkLocations(work, home) {
+    const out = { filled: 0 };
+    const roles = Array.isArray(work) ? work : [];
+    const h = home || {};
+    const groups = new Map();
+    for (const c of profileControls()) {
+      if (!/experience|employment|work|employer/.test(c.group)) continue;
+      let key = null;
+      try {
+        // One repeated "Professional Experience (n)" entry.
+        key = c.el.closest("fieldset.iCIMS_CollectionGroup") || c.el.closest("[data-collection]");
+      } catch {}
+      if (!key) continue;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(c);
+    }
+    for (const items of groups.values()) {
+      const employer = items.find((c) => /employer|company/.test(c.label));
+      const role = employer
+        ? roles.find((r) => r && clean(r.company) && normText(clean(employer.el.value)).includes(normText(r.company).split(" ")[0]))
+        : null;
+      const [rCity, rState] = String((role && role.location) || "").split(",").map((x) => clean(x));
+      const city = items.find((c) => /^city/.test(c.label));
+      const state = items.find((c) => /^state|province/.test(c.label));
+      if (city && isRequiredControl(city.el) && isUnset(city.el)) {
+        const v = rCity || clean(h.city);
+        if (v && setField(city.el, v)) out.filled++;
+      }
+      if (state && isRequiredControl(state.el) && isUnset(state.el) && !parentUnanswered(state.el)) {
+        const code = stateCode(rState) || stateCode(h.state);
+        const v = code ? US_STATES[code] : clean(rState || h.state);
+        if (v && (await choose(state.el, v))) out.filled++;
+      }
+    }
+    return out;
   }
 
   AF.icims = {
@@ -739,5 +1008,11 @@
     validationErrors,
     stageState,
     clickSubmit,
+    emailGateState,
+    submitEmailGate,
+    fillAddress,
+    fillTimeZone,
+    fillRequiredWorkLocations,
+    stateCode,
   };
 })();

@@ -328,26 +328,111 @@ export async function icimsAdvance(tabId, eng, fromStage) {
 //    value and satisfy the complexity rule in their own title attribute.
 //
 // Both need the canonical autofill profile, so it is fetched once here.
+// A multi-step application needs the profile on every step; fetch it once per run.
+async function icimsProfile(ctx) {
+  if (ctx && "icimsProfile" in ctx) return ctx.icimsProfile;
+  let profile = null;
+  if (state.job && state.job.job_id) {
+    try {
+      profile = await getAutofillProfile(state.job.job_id);
+    } catch {
+      profile = null;
+    }
+  }
+  if (ctx) ctx.icimsProfile = profile;
+  return profile;
+}
+
+async function icimsGateState(tabId) {
+  let replies = [];
+  try {
+    replies = await tabBroadcast(tabId, { type: "AF_ICIMS_GATE" });
+  } catch {
+    return null;
+  }
+  return (replies || []).find((r) => r && r.ok && r.gate) || null;
+}
+
+const GATE_WAIT_MS = 180_000; // room for the candidate to solve an hCaptcha check
+
+/**
+ * iCIMS opens every application with "Enter Your Information": the candidate's
+ * email, then Next (behind an invisible hCaptcha). Fill the profile email, press
+ * Next, and wait for the application to open. A check that hCaptcha shows is the
+ * candidate's to solve; the run waits for it and says so.
+ *
+ * Returns { gate: false } when this page has no gate, { passed: true } once past
+ * it, or { blocked: message } when it could not continue.
+ */
+export async function passIcimsEmailGate(tabId, eng, ctx) {
+  const first = await icimsGateState(tabId);
+  if (!first) return { gate: false };
+  const profile = await icimsProfile(ctx);
+  const email =
+    (profile && profile.contact && profile.contact.email) ||
+    (state.cache && state.cache.profile && state.cache.profile.email) ||
+    (state.user && state.user.email) ||
+    "";
+  if (!email && !first.email) {
+    return { blocked: "Add your email to your profile, or type it on the page and click Next, then start autofill again." };
+  }
+  setAutofill({ runStatus: "Entering your email and continuing…" });
+  try {
+    await tabBroadcast(tabId, { type: "AF_ICIMS_GATE_SUBMIT", email });
+  } catch {
+    /* the page is navigating */
+  }
+  setAutofill({ fields: [], primaryFrameId: null });
+  await delay(1500);
+  const deadline = Date.now() + GATE_WAIT_MS;
+  let asked = false;
+  while (Date.now() < deadline) {
+    await reinjectEngine(tabId, eng);
+    const gate = await icimsGateState(tabId);
+    if (!gate) {
+      // Past the gate: the application is up (the resume field of the profile step,
+      // or a step of the itinerary). A password sign-in means this email already has
+      // an account with the employer: the candidate signs in themselves.
+      const stage = await icimsStage(tabId);
+      if (stage && stage.signIn) {
+        return { blocked: "This email already has an iCIMS account with this employer. Sign in on the page, then start autofill again." };
+      }
+      if ((await icimsResumeState(tabId)) || (stage && stage.stepsPresent)) return { passed: true };
+    } else if (gate.challenge && !asked) {
+      asked = true;
+      setAutofill({ runStatus: "iCIMS shows a quick check (hCaptcha). Complete it on the page and autofill continues." });
+    }
+    await delay(1500);
+  }
+  return {
+    blocked: asked
+      ? "The iCIMS check was not completed. Complete it on the page, click Next, then start autofill again."
+      : "iCIMS did not open the application after the email step. If the page asks you to sign in (this email already has an account here), sign in, then start autofill again.",
+  };
+}
+
 export async function prepareIcims(tabId, ctx) {
   if (tabId == null) return;
   const host = await tabHost(tabId);
   if (!host) return;
   const userId = state.user && state.user.user_id;
 
-  // A multi-step application runs this prep once per step; the profile is the
-  // same every time, so fetch it once per run and reuse it across the steps.
-  let profile = null;
-  if (ctx && "icimsProfile" in ctx) {
-    profile = ctx.icimsProfile;
-  } else if (state.job && state.job.job_id) {    try {
-      profile = await getAutofillProfile(state.job.job_id);
-    } catch {
-      profile = null;
-    }
-    if (ctx) ctx.icimsProfile = profile;
-  }
+  const profile = await icimsProfile(ctx);
   const contact = (profile && profile.contact) || {};
   const address = (profile && profile.address) || {};
+
+  // Address block, time zone and required work-experience locations, from the
+  // confirmed profile (iCIMS' resume parser leaves Address and Zip empty).
+  try {
+    const prep = await tabSend(tabId, {
+      type: "AF_ICIMS_PROFILE_PREP",
+      address,
+      work: (profile && profile.workExperience) || [],
+    });
+    if (prep && prep.ok) debugLog("[autofill] iCIMS profile prep:", prep);
+  } catch {
+    /* no profile block on this step */
+  }
 
   try {
     const phoneRes = await tabSend(tabId, {

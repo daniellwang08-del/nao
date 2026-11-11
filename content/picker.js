@@ -2871,6 +2871,49 @@
       } catch {}
       return false;
     }
+    // iCIMS "Enter Your Information" gate (email, then Next). Only the frame
+    // that shows it answers.
+    if (msg.type === "AF_ICIMS_GATE") {
+      if (!AF.icims || !AF.icims.emailGateState) return false;
+      const st = AF.icims.emailGateState();
+      if (!st.gate) return false;
+      try {
+        sendResponse({ ok: true, ...st });
+      } catch {}
+      return false;
+    }
+    // Write the email and press Next. Next submits the form (after iCIMS'
+    // invisible hCaptcha), so the reply is usually lost to the navigation.
+    if (msg.type === "AF_ICIMS_GATE_SUBMIT") {
+      if (!AF.icims || !AF.icims.emailGateState || !AF.icims.emailGateState().gate) return false;
+      let pressed = false;
+      try {
+        pressed = !!AF.icims.submitEmailGate(msg.email);
+      } catch {
+        pressed = false;
+      }
+      try {
+        sendResponse({ ok: true, pressed: pressed ? 1 : 0 });
+      } catch {}
+      return false;
+    }
+    // iCIMS profile prep: address block, time zone and required work-experience
+    // locations from the candidate's confirmed profile (see content/engine/icims.js).
+    if (msg.type === "AF_ICIMS_PROFILE_PREP") {
+      const isIc = !!(AF.icims && AF.icims.isIcimsPage && AF.icims.isIcimsPage());
+      if (!isIc || !AF.icims.fillAddress) return false;
+      runExclusive(async () => {
+        const address = await AF.icims.fillAddress(msg.address);
+        const timeZone = await AF.icims.fillTimeZone(msg.address);
+        const work = await AF.icims.fillRequiredWorkLocations(msg.work, msg.address);
+        return { address, timeZone, work };
+      }).then((res) => {
+        try {
+          sendResponse({ ok: true, ...(res || {}) });
+        } catch {}
+      });
+      return true;
+    }
     // Fill a cover-letter textarea with the AI-generated cover letter body before
     // extraction. Only the frame that hosts a text/textarea control answers.
     if (msg.type === "AF_FILL_COVER_LETTER") {

@@ -15,6 +15,7 @@ import { toast } from "../toast.js";
 import {
   icimsAdvance,
   icimsStage,
+  passIcimsEmailGate,
   prepareApplyToJob,
   prepareCoverLetter,
   prepareGeneric,
@@ -146,9 +147,10 @@ export async function startAutofill({ tab: targetTab = null, headless = false, r
       const hop = await reachApplicationForm(tab.id, { waitMs: headless ? 25_000 : 15_000, focus: focusGate() });
       if (!hop.tab) return fail("The application tab was closed.");
       if (hop.gone) return fail("This job posting is no longer available (expired, filled or removed).");
-      if (!hop.ready) {
+      if (!hop.ready && !(hop.gate && engine.platform === "icims")) {
         // iCIMS walks its own login and profile steps (prepareIcims writes the
         // portal login), so a page without the form yet is still its to handle.
+        // Its "Enter Your Information" email gate is passed by the run itself.
         const ownSteps = engine.platform === "icims";
         if (hop.account && !ownSteps) return fail(NEEDS_ACCOUNT_MESSAGE);
         if (hop.steps.length) return fail(`Clicked "${hop.steps[hop.steps.length - 1]}" but no application form opened.`);
@@ -177,6 +179,17 @@ export async function startAutofill({ tab: targetTab = null, headless = false, r
     if (engine.mode === "workday") {
       await startWorkdayAutofill(tab, engine);
       return { ok: true, engine };
+    }
+    // iCIMS: pass "Enter Your Information" (email, then Next) before looking for
+    // the application form, which only exists on the page after it.
+    if (engine.platform === "icims") {
+      setState({ autofill: { ...emptyAutofill(), active: true, discovering: true, tabId: tab.id, engine } });
+      const gate = await passIcimsEmailGate(tab.id, engine, {});
+      if (gate.blocked) {
+        setAutofill({ discovering: false, runStatus: null, error: gate.blocked });
+        return { ok: false, error: gate.blocked };
+      }
+      setAutofill({ runStatus: null });
     }
     // Auto-discovery engines (Greenhouse): select the page's single application
     // container and fill it automatically - no manual field tagging.
@@ -1334,6 +1347,11 @@ async function runAutofillPass() {
     // perfectly fillable step. Re-discover against whatever step is actually open
     // so the run always starts from there.
     if (eng && eng.platform === "icims") {
+      const gate = await passIcimsEmailGate(tabId, eng, ctx);
+      if (gate.blocked) {
+        setAutofill({ running: false, runStatus: null, error: gate.blocked });
+        return;
+      }
       setAutofill({ runStatus: "Finding the current step…" });
       const found = await rediscoverForm(tabId);
       if (!found || !state.autofill.fields.length) {
@@ -1505,6 +1523,9 @@ async function runAutofillPass() {
         setAutofill({
           runStatus: `Reading step ${nav.stage.step} of ${nav.stage.total}…`,
         });
+        // A step that carries an unattached resume field gets the resume first
+        // (attaching it re-renders the step pre-filled from the parsed resume).
+        await uploadIcimsResumeFirst(tabId, eng, ctx);
         const ok = await rediscoverForm(tabId);
         if (!ok) {
           ctx.needsUser.push({
