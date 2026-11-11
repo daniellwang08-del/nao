@@ -3434,20 +3434,63 @@
     return false;
   }
 
-  function pickBestSkillOption(token, root) {
+  // Official names in Workday's skills catalogue for common short forms. Typing the
+  // short form ranks look-alikes first ("AWS" -> "AWS VPN"); typing the official
+  // name puts the skill itself on top ("Amazon Web Services (AWS)"), issue #38.
+  const SKILL_OFFICIAL = {
+    aws: "Amazon Web Services",
+    "amazon aws": "Amazon Web Services",
+    gcp: "Google Cloud Platform",
+    "google cloud": "Google Cloud Platform",
+    azure: "Microsoft Azure",
+    "ms azure": "Microsoft Azure",
+    k8s: "Kubernetes",
+    js: "JavaScript",
+    ts: "TypeScript",
+    postgres: "PostgreSQL",
+    mssql: "Microsoft SQL Server",
+    "ms sql": "Microsoft SQL Server",
+    "sql server": "Microsoft SQL Server",
+    nodejs: "Node.js",
+    "node js": "Node.js",
+    reactjs: "React.js",
+    vuejs: "Vue.js",
+    golang: "Go",
+    ml: "Machine Learning",
+    ai: "Artificial Intelligence",
+    ci: "Continuous Integration",
+    "ci/cd": "Continuous Integration",
+  };
+
+  function officialSkillName(token) {
+    return SKILL_OFFICIAL[D.norm(token)] || String(token || "").trim();
+  }
+
+  // The result that IS this skill, in the tenant's own ranking (issue #38: the old
+  // "shortest row that starts with the word" rule took "Azure Local" over the top
+  // result "Microsoft Azure", and "Python IDLE" over "Python (Programming Language)").
+  //   1. The skill itself: exact, the skill plus a qualifier in parentheses
+  //      ("python (programming language)"), the short form in parentheses
+  //      ("structured query language (sql)", "amazon web services (aws)"), or its
+  //      official name ("microsoft azure").
+  //   2. Otherwise the first related row, in Workday's order (its relevance ranking).
+  function pickBestSkillOption(token, root, official) {
     const w = D.norm(token);
     if (!w || !root) return null;
-    const scored = promptResultOptions(root)
+    const ow = D.norm(official || officialSkillName(token));
+    const rows = promptResultOptions(root)
       .map((o) => ({ o, t: D.norm(o.textContent) }))
-      .filter((x) => x.t && skillTextRelated(x.t, w));
-    if (!scored.length) return null;
-    const exact = scored.find((x) => x.t === w);
-    if (exact) return exact.o;
-    const prefixed = scored
-      .filter((x) => x.t.startsWith(w + " ") || x.t.startsWith(w + "("))
-      .sort((a, b) => a.t.length - b.t.length);
-    if (prefixed.length) return prefixed[0].o;
-    return scored.sort((a, b) => a.t.length - b.t.length)[0].o;
+      .filter((x) => x.t);
+    if (!rows.length) return null;
+    const isSkill = (t) => {
+      const bare = t.replace(/\s*\([^)]*\)\s*/g, " ").replace(/\s+/g, " ").trim();
+      const paren = D.norm(((t.match(/\(([^)]*)\)/) || [])[1]) || "");
+      return t === w || bare === w || t === ow || bare === ow || (paren && (paren === w || paren === ow));
+    };
+    const itself = rows.find((x) => isSkill(x.t));
+    if (itself) return itself.o;
+    const related = rows.find((x) => skillTextRelated(x.t, w) || (ow !== w && skillTextRelated(x.t, ow)));
+    return related ? related.o : null;
   }
 
   // True only when the open list shows a row related to the typed skill.
@@ -3535,21 +3578,23 @@
       } catch {}
     }
     await clearSkillsSearchInput(input);
-    WD._skillsStage = "type:" + token.slice(0, 24) + " chips=" + multiChipCount(multi);
-    D.nativeSet(input, token);
-    input.dispatchEvent(new InputEvent("input", { bubbles: true, data: token, inputType: "insertText" }));
-    const last = token.slice(-1) || "a";
+    // Search the official name ("Amazon Web Services" for "AWS"): Workday then ranks the skill itself first.
+    const typed = officialSkillName(token);
+    WD._skillsStage = "type:" + typed.slice(0, 24) + " chips=" + multiChipCount(multi);
+    D.nativeSet(input, typed);
+    input.dispatchEvent(new InputEvent("input", { bubbles: true, data: typed, inputType: "insertText" }));
+    const last = typed.slice(-1) || "a";
     pressKey(input, last, "Key" + (/[a-z]/i.test(last) ? last.toUpperCase() : "A"), last.charCodeAt(0) || 65);
     await D.delay(60);
 
-    let gotResults = await waitForSkillsSearchResults(multi, token, 1000);
+    let gotResults = await waitForSkillsSearchResults(multi, typed, 1000);
     if (!gotResults) {
       WD._skillsStage = "enter-for-results:" + token.slice(0, 24);
       try {
         input.focus({ preventScroll: true });
       } catch {}
       pressEnter(input);
-      gotResults = await waitForSkillsSearchResults(multi, token, 4500);
+      gotResults = await waitForSkillsSearchResults(multi, typed, 4500);
     }
     let root = activeMultiListRoot(multi);
     const mounted = promptResultOptions(root)
@@ -3573,11 +3618,11 @@
     // Pointer-select best RELATED row. Do NOT focus input first (Fiserv chips:0).
     // Do NOT rely on Enter#2 alone (often re-submits search).
     root = activeMultiListRoot(multi);
-    let match = pickBestSkillOption(token, root);
+    let match = pickBestSkillOption(token, root, typed);
     if (!match) {
       await D.delay(150);
       root = activeMultiListRoot(multi);
-      match = pickBestSkillOption(token, root);
+      match = pickBestSkillOption(token, root, typed);
     }
     if (!match) {
       try {
