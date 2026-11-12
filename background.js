@@ -642,7 +642,8 @@ async function repaintJobFab(tabId) {
   try {
     const s = await fabState(tabId);
     if (!s.show) return;
-    await chrome.tabs.sendMessage(tabId, { type: "AA_FAB_STATUS", state: s.state, message: s.message || "" }, { frameId: 0 });
+    const actions = await fabActions(await jobForTab(tabId));
+    await chrome.tabs.sendMessage(tabId, { type: "AA_FAB_STATUS", state: s.state, message: s.message || "", actions }, { frameId: 0 });
   } catch {
     /* no button on that tab */
   }
@@ -701,6 +702,137 @@ function expandJob(tabId, windowId, sendResponse) {
   })();
 }
 
+// ── "You applied" notification ──────────────────────────────────────────────
+// Every job newly recorded as applied (api.markApplied, from any part of the extension) shows a short card at the
+// bottom-right of the tab the user is looking at: "<title> at <company> · Applied today: N".
+
+const APPLIED_TOAST_FILE = "content/applied-toast.js";
+const recentlyAnnounced = new Map(); // jobId -> time, so one application shows once
+
+async function jobLabel(jobId, meta) {
+  if (meta && meta.title) return { title: meta.title, company: meta.company || "" };
+  try {
+    const { [AA_HISTORY_KEY]: history } = await chrome.storage.local.get(AA_HISTORY_KEY);
+    const h = history && history[jobId];
+    if (h && h.title) return { title: h.title, company: h.company || "" };
+  } catch {
+    /* no history */
+  }
+  try {
+    const job = await api.getJob(jobId);
+    if (job && job.title) return { title: job.title, company: job.company || "" };
+  } catch {
+    /* signed out or gone */
+  }
+  return { title: "", company: "" };
+}
+
+async function appliedToday() {
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const home = await api.getHome(tz);
+    const n = home && home.counts ? Number(home.counts.applied_today) : NaN;
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+async function showAppliedToast(payload) {
+  const msg = { type: "NAO_APPLIED_TOAST", ...payload };
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => []);
+  if (tab && tab.id != null && /^https?:/i.test(tab.url || "")) {
+    try {
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: [APPLIED_TOAST_FILE] });
+      await chrome.tabs.sendMessage(tab.id, msg, { frameId: 0 });
+      return;
+    } catch {
+      /* no access to that site: the console page shows it instead */
+    }
+  }
+  // Extension pages (the auto-apply console) load the same script and show it there.
+  chrome.runtime.sendMessage(msg, () => void chrome.runtime.lastError);
+}
+
+async function announceApplied(event) {
+  const now = Date.now();
+  for (const [id, at] of recentlyAnnounced) if (now - at > 60_000) recentlyAnnounced.delete(id);
+  const ids = (event.jobIds || []).map(String).filter((id) => !recentlyAnnounced.has(id));
+  if (!ids.length) return;
+  ids.forEach((id) => recentlyAnnounced.set(id, now));
+  const today = await appliedToday();
+  if (ids.length > 1) {
+    await showAppliedToast({ count: ids.length, today });
+    return;
+  }
+  const { title, company } = await jobLabel(ids[0], event);
+  await showAppliedToast({ title, company, today, count: 1 });
+}
+
+api.setAppliedListener((event) => void announceApplied(event).catch((err) => console.warn("applied toast failed", err)));
+
+chrome.runtime.onMessage.addListener((msg, sender) => {
+  if (!(msg && msg.type === "NAO_APPLIED") || !sender || sender.id !== chrome.runtime.id) return false;
+  void announceApplied(msg).catch((err) => console.warn("applied toast failed", err));
+  return false;
+});
+
+// ── corner toolbar actions: Applied / Invalid / Skip ───────────────────────
+// An auto-apply job is the console's (it closes the tab, records history and keeps the queue moving); a job the
+// side panel opened is the panel's; otherwise the background records it directly. Skip needs one of the two.
+
+async function fabActions(job) {
+  const consoleOpen = await isAutoApplyConsoleOpen();
+  const panelOpen = await isPanelOpen();
+  const ownedByAutoApply = job.source === "autoapply" || job.source === "handoff";
+  return { applied: true, invalid: true, skip: (ownedByAutoApply && consoleOpen) || panelOpen };
+}
+
+async function fabAction(tabId, action) {
+  const job = await jobForTab(tabId);
+  if (!job) return { ok: false, error: "NAO no longer tracks this job on this tab." };
+  if (!["applied", "invalid", "skip"].includes(action)) return { ok: false, error: "Unknown action." };
+  const ownedByAutoApply = job.source === "autoapply" || job.source === "handoff";
+  const ask = (message) =>
+    new Promise((resolve) => {
+      chrome.runtime.sendMessage(message, (res) => resolve(chrome.runtime.lastError ? null : res || null));
+    });
+  if (ownedByAutoApply && (await isAutoApplyConsoleOpen())) {
+    const res = await ask({ type: "AA_TAB_ACTION", jobId: job.jobId, tabId, action });
+    if (res) return res;
+  }
+  if (await isPanelOpen()) {
+    const res = await ask({ type: "PAGE_JOB_ACTION", jobId: job.jobId, tabId, action });
+    if (res && res.ok) return res;
+  }
+  if (action === "skip") return { ok: false, error: "Open NAO to skip this job." };
+  try {
+    if (action === "applied") {
+      const marked = await api.markApplied([job.jobId]);
+      api.updateSession(job.jobId, "completed").catch(() => {});
+      return { ok: true, state: "done", message: Number(marked && marked.marked) > 0 ? "Marked applied." : "Already marked applied." };
+    }
+    await api.reportJobInvalid(job.jobId, "Marked invalid from the application page.");
+    api.updateSession(job.jobId, "completed").catch(() => {});
+    return { ok: true, state: "idle", message: "Reported as invalid. It is removed from your lists." };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+}
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!(msg && msg.type === "AA_FAB_ACTION")) return false;
+  const tabId = sender && sender.tab ? sender.tab.id : null;
+  if (tabId == null || sender.id !== chrome.runtime.id) {
+    sendResponse({ ok: false });
+    return false;
+  }
+  fabAction(tabId, String(msg.action || ""))
+    .then(sendResponse)
+    .catch((err) => sendResponse({ ok: false, error: String((err && err.message) || err) }));
+  return true;
+});
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || !["AA_FAB_STATE", "AA_FAB_EXPAND"].includes(msg.type)) return false;
   const tabId = sender && sender.tab ? sender.tab.id : null;
@@ -713,6 +845,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
   fabState(tabId)
+    .then(async (st) => (st && st.show ? { ...st, actions: await fabActions(await jobForTab(tabId)) } : st))
     .then(sendResponse)
     .catch((err) => sendResponse({ ok: false, show: false, error: String((err && err.message) || err) }));
   return true;

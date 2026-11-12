@@ -426,6 +426,33 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return true;
 });
 
+// The corner buttons on a job's page: Applied / Invalid / Skip, as if pressed here.
+async function tabAction(jobId, action) {
+  if (!entryFor(jobId) && !store.runs[jobId]) return null; // not this console's job
+  if (store.runs[jobId]) await finishRun(jobId, { status: "needs_you", message: "Stopped by you on the page." });
+  if (action === "applied") {
+    await markEntriesApplied([jobId]);
+    return { ok: true, state: "done", message: "Marked applied.", closing: true };
+  }
+  if (action === "invalid") {
+    await markInvalid(jobId);
+    return { ok: true, state: "idle", message: "Marked invalid.", closing: true };
+  }
+  if (action === "skip") {
+    await applyLater([jobId]);
+    return { ok: true, state: "idle", message: "Set aside to try again after the rest of the queue.", closing: true };
+  }
+  return { ok: false, error: "Unknown action." };
+}
+
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (!(msg && msg.type === "AA_TAB_ACTION" && msg.jobId)) return false;
+  tabAction(String(msg.jobId), String(msg.action || ""))
+    .then((res) => sendResponse(res))
+    .catch((err) => sendResponse({ ok: false, error: (err && err.message) || "Could not do that." }));
+  return true;
+});
+
 /** A "Fill again" press that opened this console. */
 async function takePendingRefill() {
   const { aaRefillPending: p } = await chrome.storage.session.get("aaRefillPending").catch(() => ({}));
@@ -594,7 +621,7 @@ async function openEntry(jobId) {
 async function markEntriesApplied(jobIds) {
   if (!jobIds.length) return;
   try {
-    await api.markApplied(jobIds);
+    await api.markApplied(jobIds, jobIds.length === 1 ? entryFor(jobIds[0]) : null);
   } catch (err) {
     notify("danger", (err && err.message) || "Could not mark them applied.");
     return;

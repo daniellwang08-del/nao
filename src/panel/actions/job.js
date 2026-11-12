@@ -382,7 +382,7 @@ export async function completeJob({ next }) {
     chrome.storage.session.remove("pendingAppSubmitted").catch(() => {});
     await teardownAutofill();
     try {
-      const marked = await api.markApplied([jobId]);
+      const marked = await api.markApplied([jobId], state.job);
       if (!marked || !(Number(marked.marked) > 0)) throw new Error("Could not mark this job as applied. Try again.");
       api.updateSession(jobId, "completed").catch(() => {});
       patchJob(jobId, { applied: true, appliedAt: marked.applied_at || new Date().toISOString() });
@@ -476,7 +476,7 @@ async function recordAppliedOffScreen(jobId) {
   lastAutoJobId = jobId;
   lastAutoAt = Date.now();
   try {
-    const marked = await api.markApplied([jobId]);
+    const marked = await api.markApplied([jobId], state.job && state.job.job_id === jobId ? state.job : null);
     if (!marked || !(Number(marked.marked) > 0)) return false;
     api.updateSession(jobId, "completed").catch(() => {});
     toast("Application submitted. Marked as applied.", "ok");
@@ -552,6 +552,41 @@ async function confirmReport(job) {
   } catch {
     await goHome();
   }
+}
+
+/**
+ * The corner buttons on the job's page (Applied / Invalid / Skip). For the job on screen they do what the panel's
+ * own buttons do; for another job the background records it (null = not handled here).
+ */
+export async function pageJobAction({ jobId, action }) {
+  const job = state.view === "job" && state.job && String(state.job.job_id) === String(jobId) ? state.job : null;
+  if (!job) return null;
+  if (action === "applied") {
+    await completeJob({ next: true });
+    return { ok: true, state: "done", message: "Marked applied." };
+  }
+  if (action === "skip") {
+    await skipJob();
+    return { ok: true, state: "idle", message: "Skipped. Find it later under In progress." };
+  }
+  if (action === "invalid") {
+    // The page asked for confirmation already.
+    try {
+      await api.reportJobInvalid(job.job_id, "expired");
+      api.updateSession(job.job_id, "completed").catch(() => {});
+    } catch (err) {
+      return { ok: false, error: messageOf(err, "Could not report this job.") };
+    }
+    await teardownAutofill();
+    setState({ reportNotice: { title: job.title, company: job.company } });
+    try {
+      await advance(job.job_id, { keepReportNotice: true });
+    } catch {
+      await goHome();
+    }
+    return { ok: true, state: "idle", message: "Reported as invalid." };
+  }
+  return { ok: false, error: "Unknown action." };
 }
 
 export function dismissReportNotice() {

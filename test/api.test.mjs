@@ -113,3 +113,15 @@ test("every list has copy and a count key", () => {
     assert.ok(def.count, id);
   }
 });
+
+test("marking applied announces only jobs that became applied, with their name", async () => {
+  await storage.setToken("tok");
+  const seen = [];
+  api.setAppliedListener((e) => seen.push(e));
+  stubFetch(200, { marked: 1, applied_at: "2026-11-11T10:00:00Z" });
+  await api.markApplied(["j1"], { title: "Software Engineer", company: "Acme" });
+  stubFetch(200, { marked: 0 }); // already applied: no second notification
+  await api.markApplied(["j1"]);
+  api.setAppliedListener(null);
+  assert.deepEqual(seen, [{ jobIds: ["j1"], marked: 1, title: "Software Engineer", company: "Acme" }]);
+});

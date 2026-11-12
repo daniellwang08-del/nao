@@ -415,7 +415,7 @@ async function run(cfg) {
   if (result.submitted) {
     report({ submittedAt: Date.now() });
     step("Marking applied…");
-    await api.markApplied([jobId]);
+    await api.markApplied([jobId], job);
     await api.updateSession(jobId, "completed").catch(() => {});
     return {
       status: "applied",
@@ -441,7 +441,7 @@ async function run(cfg) {
   }
   const via = await submitAndConfirm(tab, job);
   step("Marking applied…");
-  await api.markApplied([jobId]);
+  await api.markApplied([jobId], job);
   // Awaited: the console removes this frame as soon as the run finishes.
   await api.updateSession(jobId, "completed").catch(() => {});
   return { status: "applied", message: `Submitted and confirmed (${via}).` };
@@ -489,7 +489,7 @@ async function refill() {
   report({ filled: result.filled });
   if (result.submitted) {
     step("Marking applied…");
-    await api.markApplied([jobId]);
+    await api.markApplied([jobId], job);
     await api.updateSession(jobId, "completed").catch(() => {});
     return { status: "applied", message: "The site submitted the application on its own." };
   }

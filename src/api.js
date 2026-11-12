@@ -289,8 +289,32 @@ export const applyCheck = (jobId, { timezone, syncInbox = true, wait = true } = 
 export const refreshInbox = (timezone) =>
   apiFetch("/assistant/inbox/refresh", { method: "POST", body: { timezone }, timeoutMs: 58_000 });
 
-export const markApplied = (jobIds) =>
-  apiFetch("/jobs/valid/applied/batch", { method: "POST", body: { job_ids: jobIds } });
+// Whoever records an application as applied (auto-apply, the side panel, the console, the page's corner
+// buttons, the background) goes through markApplied, so the "You applied" notification never misses one. The
+// background registers the listener; elsewhere the event is sent to it.
+let appliedListener = null;
+export function setAppliedListener(fn) {
+  appliedListener = typeof fn === "function" ? fn : null;
+}
+
+/** `meta` ({ title, company }) names the job in the notification; without it the background looks it up. */
+export const markApplied = async (jobIds, meta = null) => {
+  const res = await apiFetch("/jobs/valid/applied/batch", { method: "POST", body: { job_ids: jobIds } });
+  try {
+    const marked = Number(res && res.marked) || 0;
+    if (marked > 0) {
+      const event = { jobIds: (jobIds || []).map(String), marked, title: (meta && meta.title) || "", company: (meta && meta.company) || "" };
+      if (appliedListener) appliedListener(event);
+      else chrome.runtime.sendMessage({ type: "NAO_APPLIED", ...event }, () => void chrome.runtime.lastError);
+    }
+  } catch {
+    /* notification only */
+  }
+  return res;
+};
+
+/** One job's details (title, company, URLs). */
+export const getJob = (jobId) => apiFetch(`/jobs/valid/${encodeURIComponent(jobId)}`);
 
 /** Submit was clicked; the server refuses to apply to this job again even if the site never confirms. */
 export const recordSubmitted = (jobId) =>

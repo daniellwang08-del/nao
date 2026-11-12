@@ -18,6 +18,8 @@ const body = [
   grab("async function fabState(tabId) {"),
   grab("function expandJob(tabId, windowId, sendResponse) {"),
   grab("async function repaintJobFab(tabId) {"),
+  grab("async function fabActions(job) {"),
+  grab("async function fabAction(tabId, action) {"),
 ].join("\n");
 
 function area(initial = {}) {
@@ -39,8 +41,8 @@ function area(initial = {}) {
   };
 }
 
-function load({ session = {}, local = {}, panelOpens = true, consoleOpen = false } = {}) {
-  const calls = { order: [], messages: [], created: [], painted: [] };
+function load({ session = {}, local = {}, panelOpens = true, consoleOpen = false, panelOpen = false, replies = {} } = {}) {
+  const calls = { order: [], messages: [], created: [], painted: [], api: [] };
   const chrome = {
     storage: { session: area(session), local: area(local) },
     sidePanel: {
@@ -50,21 +52,26 @@ function load({ session = {}, local = {}, panelOpens = true, consoleOpen = false
         return panelOpens ? Promise.resolve() : Promise.reject(new Error("no gesture"));
       },
     },
-    runtime: { sendMessage: (m, cb) => { calls.messages.push(m); if (cb) cb(); }, lastError: null },
+    runtime: { sendMessage: (m, cb) => { calls.messages.push(m); if (cb) cb(replies[m.type]); }, lastError: null },
     tabs: {
       create: async (t) => { calls.created.push(t.url); return { id: 99 }; },
       sendMessage: async (tabId, m) => { calls.painted.push([tabId, m]); },
     },
   };
+  const api = {
+    markApplied: async (ids) => { calls.api.push(["markApplied", ids]); return { marked: ids.length }; },
+    reportJobInvalid: async (id, reason) => { calls.api.push(["reportJobInvalid", id, reason]); return {}; },
+    updateSession: async () => ({}),
+  };
   const make = new Function(
-    "chrome", "getBackendUrl", "isAutoApplyConsoleOpen",
+    "chrome", "getBackendUrl", "isAutoApplyConsoleOpen", "isPanelOpen", "api",
     `const AA_HANDOFF_PREFIX = "aaHandoff:"; const AA_TAB_PREFIX = "aaTab:"; const AA_FAB_PREFIX = "aaFab:";
      const AA_HISTORY_KEY = "aaHistory"; const PENDING_JOB_KEY = "pendingWebappJob";
      const APPLY_TAB_MAX_AGE_MS = 6 * 60 * 60 * 1000;
      ${body}
-     return { jobForTab, rememberJobTab, fabState, expandJob, repaintJobFab };`,
+     return { jobForTab, rememberJobTab, fabState, expandJob, repaintJobFab, fabActions, fabAction };`,
   );
-  const fns = make(chrome, async () => "https://nao.it.com", async () => consoleOpen);
+  const fns = make(chrome, async () => "https://nao.it.com", async () => consoleOpen, async () => panelOpen, api);
   return { ...fns, chrome, calls };
 }
 
@@ -133,11 +140,40 @@ test("when auto-apply finishes, the button stops showing Filling and shows the o
   await chrome.storage.session.set({ "aaHandoff:2": { jobId: "j2" } });
   await chrome.storage.local.set({ aaHistory: { j2: { status: "needs_you", message: "2 fields need you." } } });
   await repaintJobFab(2);
-  assert.deepEqual(calls.painted.at(-1), [2, { type: "AA_FAB_STATUS", state: "needs", message: "2 fields need you." }]);
+  assert.deepEqual(calls.painted.at(-1), [
+    2,
+    { type: "AA_FAB_STATUS", state: "needs", message: "2 fields need you.", actions: { applied: true, invalid: true, skip: false } },
+  ]);
 });
 
 test("tabs without a job button are left alone", async () => {
   const { repaintJobFab, calls } = load();
   await repaintJobFab(5);
   assert.equal(calls.painted.length, 0);
+});
+
+test("toolbar actions on an auto-apply tab go to the console, which closes the tab and moves the queue", async () => {
+  const reply = { ok: true, state: "done", message: "Marked applied.", closing: true };
+  const { fabAction, fabActions, calls } = load({ session: { "aaHandoff:1": { jobId: "j1" } }, consoleOpen: true, replies: { AA_TAB_ACTION: reply } });
+  assert.deepEqual(await fabActions({ jobId: "j1", source: "handoff" }), { applied: true, invalid: true, skip: true });
+  assert.deepEqual(await fabAction(1, "applied"), reply);
+  assert.deepEqual(calls.messages.at(-1), { type: "AA_TAB_ACTION", jobId: "j1", tabId: 1, action: "applied" });
+  assert.deepEqual(calls.api, []); // the console records it
+});
+
+test("a job the side panel opened is acted on by the panel", async () => {
+  const reply = { ok: true, state: "idle", message: "Skipped." };
+  const { fabAction, calls } = load({ session: { applyTabJobs: { 3: { jobId: "j3", at: now } } }, panelOpen: true, replies: { PAGE_JOB_ACTION: reply } });
+  assert.deepEqual(await fabAction(3, "skip"), reply);
+  assert.deepEqual(calls.messages.at(-1), { type: "PAGE_JOB_ACTION", jobId: "j3", tabId: 3, action: "skip" });
+});
+
+test("with neither the console nor the panel open, Applied and Invalid are recorded directly and Skip is not offered", async () => {
+  const { fabAction, fabActions, calls } = load({ session: { applyTabJobs: { 3: { jobId: "j3", at: now } } } });
+  assert.deepEqual(await fabActions({ jobId: "j3", source: "apply" }), { applied: true, invalid: true, skip: false });
+  assert.equal((await fabAction(3, "applied")).ok, true);
+  assert.equal((await fabAction(3, "invalid")).ok, true);
+  assert.equal((await fabAction(3, "skip")).ok, false);
+  assert.deepEqual(calls.api.map((c) => c[0]), ["markApplied", "reportJobInvalid"]);
+  assert.equal((await fabAction(9, "applied")).ok, false); // not a NAO tab
 });

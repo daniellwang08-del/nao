@@ -1,6 +1,6 @@
 // Messages from content scripts and the background worker.
 
-import { handleApplicationSubmitted, handleAskSelection, onWebappOpenJob } from "./actions/job.js";
+import { handleApplicationSubmitted, handleAskSelection, onWebappOpenJob, pageJobAction } from "./actions/job.js";
 import { reloadSession } from "./actions/session.js";
 import { handleAutofillMessage } from "./autofill/index.js";
 import { setState } from "./state.js";
@@ -10,8 +10,14 @@ export function installMessageRouter() {
   chrome.storage.local.onChanged.addListener((changes) => {
     if (changes.aaPageButtons) setState({ aaPageButtons: changes.aaPageButtons.newValue !== false });
   });
-  chrome.runtime.onMessage.addListener((msg, sender) => {
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (!msg || typeof msg.type !== "string") return;
+    if (msg.type === "PAGE_JOB_ACTION") {
+      pageJobAction(msg)
+        .then((res) => sendResponse(res))
+        .catch((err) => sendResponse({ ok: false, error: String((err && err.message) || err) }));
+      return true;
+    }
     switch (msg.type) {
       case "ASK_SELECTION":
         void handleAskSelection(msg);
