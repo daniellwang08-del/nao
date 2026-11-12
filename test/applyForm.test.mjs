@@ -118,6 +118,46 @@ test("a resume upload with one field counts as a form", () => {
   assert.equal(probeApplyPage(RULES, false).ready, true);
 });
 
+// jobs.gem.com (live markup, 2026-11-11): no <form>; each field is
+// <div><span>First name *</span><div class="textField"><div><div><input type="text"></div></div></div></div>
+// and the input has no name, id, placeholder, <label> or aria. Its label is the span beside its wrapper.
+function besideLabel(control, labelText, { above = null } = {}) {
+  const label = above || { tagName: "SPAN", innerText: labelText, textContent: labelText, querySelector: () => null };
+  const column = { tagName: "DIV", previousElementSibling: null, parentElement: { tagName: "BODY" } };
+  const textField = { tagName: "DIV", previousElementSibling: label, parentElement: column };
+  const inner = { tagName: "DIV", previousElementSibling: null, parentElement: textField };
+  control.previousElementSibling = null;
+  control.parentElement = inner;
+  return control;
+}
+const bare = (attrs = {}, opts = {}) => el("input", { attrs: { type: "text", ...attrs }, ...opts });
+
+test("jobs.gem.com: a formless application whose labels sit beside bare inputs is a form", () => {
+  const fields = [
+    besideLabel(bare(), "First name *"),
+    besideLabel(bare(), "Last name *"),
+    besideLabel(bare(), "Email *"),
+    besideLabel(bare(), "LinkedIn URL"),
+    besideLabel(bare(), "Location *"),
+    besideLabel(el("input", { attrs: { type: "file", accept: "application/pdf,.pdf,.doc,.docx" }, visible: false }), "Resume *"),
+    besideLabel(el("textarea", { attrs: {} }), "Share something you've built"),
+  ];
+  page({ fields, href: "https://jobs.gem.com/elm-ai-com/am9icG9zdDpx7qOD23nm8cvic3dw1Qen" });
+  assert.equal(probeApplyPage(RULES, false).ready, true);
+});
+
+test("text above a bare input is its label only if it holds no controls, and never overrides a real name", () => {
+  // A block above that is itself a form row (has an input) is not this field's label.
+  const row = { tagName: "DIV", innerText: "Email", textContent: "Email", querySelector: () => ({}) };
+  const fields = [besideLabel(bare(), "", { above: row }), besideLabel(bare(), "First name"), besideLabel(bare(), "Phone")];
+  page({ fields, href: "https://example.com/careers/1" });
+  assert.equal(probeApplyPage(RULES, false).ready, false);
+  // A field with its own identity keeps it: "q" (a search box) with "Email" written above stays unidentified.
+  const own = [besideLabel(bare({ name: "q" }), "Email"), besideLabel(bare(), "First name"), besideLabel(bare(), "Phone")];
+  page({ fields: own, href: "https://example.com/careers/1" });
+  assert.equal(probeApplyPage(RULES, false).ready, false);
+});
+
 test("visible fields without application evidence are not a form", () => {
   const apply = el("a", { text: "Apply now", attrs: { href: "https://jobs.lever.co/acme/1/apply" } });
   page({ fields: inputs(5), controls: [apply], href: "https://jobs.lever.co/acme/1" });

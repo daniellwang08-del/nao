@@ -107,11 +107,33 @@ export function probeApplyPage(rules, act) {
     }
     return t;
   };
-  const describe = (el) =>
-    [el.name, el.id, el.placeholder, attr(el, "autocomplete"), attr(el, "aria-label"), attr(el, "data-ui"), attr(el, "data-qa"), attr(el, "data-testid"), labelOf(el)]
+  // The visible label of a control that has no other identity: the control-free block just above its
+  // wrapper. Gem (jobs.gem.com) renders <span>First name *</span> next to a bare <input type=text> with
+  // no name, id, placeholder, <label> or aria, and no <form>. Same rule as the engine's questionAbove.
+  const textAbove = (el) => {
+    try {
+      let node = el;
+      for (let depth = 0; node && depth < 6; depth++) {
+        const prev = node.previousElementSibling;
+        if (prev) {
+          if (prev.querySelector("input, select, textarea, button, [role=combobox], [role=radio]")) return "";
+          const t = String(prev.innerText || prev.textContent || "").replace(/\s+/g, " ").trim();
+          return t.length <= 120 ? t : "";
+        }
+        node = node.parentElement;
+        if (!node || node.tagName === "FORM" || node.tagName === "BODY") return "";
+      }
+    } catch {
+      /* ignore */
+    }
+    return "";
+  };
+  const describe = (el) => {
+    const own = [el.name, el.id, el.placeholder, attr(el, "autocomplete"), attr(el, "aria-label"), attr(el, "data-ui"), attr(el, "data-qa"), attr(el, "data-testid"), labelOf(el)]
       .filter(Boolean)
-      .join(" ")
-      .toLowerCase();
+      .join(" ");
+    return (own.trim() ? own : textAbove(el)).toLowerCase();
+  };
   const fieldSel = "input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=submit]):not([type=button]):not([type=search]):not([type=image]):not([type=reset]), textarea, select";
   const emailRe = /e-?mail/;
   const nameRe = /(^|[^a-z])(first|last|full|given|family|legal|preferred|candidate|sur|f|l)?[-_ .]?name([^a-z]|$)/;
