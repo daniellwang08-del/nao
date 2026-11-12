@@ -130,6 +130,8 @@ const ENGINE_SCRIPTS = {
     "content/engine/jobvite.js",
     "content/engine/ashby.js",
     "content/engine/icims.js",
+    "content/engine/dayforce.js",
+    "content/engine/drivers/antd-select.js",
     "content/engine/drivers/sr-select.js",
     "content/engine/drivers/icims-dropdown.js",
     "content/engine/drivers/fab-select.js",

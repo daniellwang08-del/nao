@@ -97,6 +97,17 @@ test("a Workable listing: clicks Apply now", () => {
   assert.equal(share.clicks, 0);
 });
 
+test("Dayforce's account choice: clicks Apply without an Account, never LinkedIn or Sign In", () => {
+  const linkedin = el("button", { text: "Apply With LinkedIn" });
+  const guest = el("button", { text: "Apply without an Account" });
+  const signIn = el("button", { text: "Sign In" });
+  page({ controls: [linkedin, guest, signIn], href: "https://jobs.dayforcehcm.com/en-US/diversified/candidateportal/jobs/21538/apply?flowSelection=true" });
+  const out = probeApplyPage(RULES, true);
+  assert.equal(out.clicked, true);
+  assert.equal(guest.clicks, 1);
+  assert.equal(linkedin.clicks + signIn.clicks, 0);
+});
+
 test("a careers-page.com (Manatal) listing: clicks Apply for Position", () => {
   const top = el("button", { text: "Apply for Position", attrs: { class: "btn btn-lg btn-outline-light" } });
   page({ controls: [top], href: "https://www.careers-page.com/24-mag/job/V6768V8R" });

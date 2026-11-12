@@ -29,6 +29,11 @@ import {
   prepareWorkable,
   submitJobDiva,
   uploadIcimsResumeFirst,
+  dayforceAcknowledge,
+  dayforceNext,
+  dayforcePhones,
+  dayforceStage,
+  prepareDayforce,
 } from "./platforms.js";
 import {
   autofillFrameId,
@@ -759,6 +764,7 @@ const SR_MAX_PAGES = 8; // SmartRecruiters multi-step applications: hard cap on 
 const BZY_MAX_PAGES = 6; // Breezy.hr multi-step applications: hard cap on sections
 const JV_MAX_PAGES = 6; // Jobvite multi-step applications: hard cap on steps
 const ICIMS_MAX_PAGES = 10; // iCIMS itineraries are typically 3-5 steps; cap well above
+const DAYFORCE_MAX_STEPS = 12; // Candidate Info + up to ~8 questionnaires + Submit
 
 // Re-run auto-discovery on the current page and wait for the application
 // container to register. Used between SmartRecruiters steps: after clicking
@@ -1409,7 +1415,68 @@ async function runAutofillPass() {
       }
     }
 
-    let lastSpecs = await fillCurrentPage(tabId, eng, ctx, true);
+    // Dayforce: apply without an account, import the resume FIRST (Dayforce fills the form from it), set the work
+    // hours and the phone dialing code, then read whichever step is open.
+    let dayforceStart = null;
+    if (eng && eng.platform === "dayforce") {
+      const prep = await prepareDayforce(tabId, eng, ctx);
+      if (prep.blocked) {
+        setAutofill({ running: false, runStatus: null, error: prep.blocked });
+        return;
+      }
+      dayforceStart = prep.stage || null;
+      if (!dayforceStart || dayforceStart.kind !== "submit") {
+        setAutofill({ runStatus: "Reading the form…" });
+        const found = await rediscoverForm(tabId);
+        if (!found || !state.autofill.fields.length) {
+          setAutofill({ running: false, runStatus: null, error: "Could not find the Dayforce application form on this page." });
+          return;
+        }
+      }
+    }
+
+    let lastSpecs = dayforceStart && dayforceStart.kind === "submit" ? [] : await fillCurrentPage(tabId, eng, ctx, true);
+
+    // Dayforce: Candidate Info -> "Questionnaire n of N" (each its own step) -> Submit, in one tab. Fill a step,
+    // click Next, fill the next; on the last step tick the Candidate Acknowledgement and hand over: Submit is the
+    // candidate's. A step that will not pass lists its unmet fields for the candidate.
+    if (eng && eng.platform === "dayforce") {
+      for (let step = 0; step < DAYFORCE_MAX_STEPS; step++) {
+        await dayforcePhones(tabId, ctx);
+        const cur = await dayforceStage(tabId);
+        if (!cur) break;
+        if (cur.stage.kind === "submit") {
+          const ack = await dayforceAcknowledge(tabId);
+          ctx.needsUser.push({
+            cid: "dayforce-submit",
+            label: "Submit",
+            reason: ack.ok
+              ? "Every step is filled and the Candidate Acknowledgement is checked. Review the application and click Submit."
+              : "Every step is filled. Check \"I agree to the Candidate Acknowledgement\", review, and click Submit.",
+          });
+          break;
+        }
+        setAutofill({
+          runStatus: cur.stage.kind === "questionnaire" ? `Questionnaire ${cur.stage.index} of ${cur.stage.total} filled. Next…` : "Candidate Info filled. Next…",
+        });
+        const nav = await dayforceNext(tabId);
+        debugLog("[autofill] Dayforce next:", nav);
+        if (!nav.advanced) {
+          const errs = (nav.errors && nav.errors.length ? nav.errors : (nav.stage && nav.stage.errors) || []).slice(0, 15);
+          for (const e of errs) {
+            ctx.needsUser.push({ cid: "df-block:" + e, label: e.split(": ")[0], reason: "Complete this, then click Next to continue" });
+          }
+          if (!errs.length) {
+            ctx.needsUser.push({ cid: "df-next", label: "Next", reason: "The page did not move on. Check the step for anything missing, then click Next." });
+          }
+          break;
+        }
+        if (nav.stage && nav.stage.kind === "submit") continue; // the acknowledgement is handled at the loop top
+        const ok = await rediscoverForm(tabId);
+        if (!ok) break;
+        lastSpecs = await fillCurrentPage(tabId, eng, ctx, false);
+      }
+    }
 
     // SmartRecruiters: longer applications split across steps with a footer
     // "Next" button (the final step shows "Submit" instead). Fill the step, click

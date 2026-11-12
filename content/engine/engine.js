@@ -192,6 +192,7 @@
         if (AF.icims && AF.icims.shouldSkipControl && AF.icims.shouldSkipControl(anchor)) continue;
         if (AF.jobvite && AF.jobvite.shouldSkipControl && AF.jobvite.shouldSkipControl(anchor)) continue;
         if (AF.jobdiva && AF.jobdiva.shouldSkipControl && AF.jobdiva.shouldSkipControl(anchor)) continue;
+        if (AF.dayforce && AF.dayforce.shouldSkipControl && AF.dayforce.shouldSkipControl(anchor)) continue;
         if (anchor.closest && AF.workable && anchor.closest('[data-ui="education"], [data-ui="experience"], [data-ui="autofill-button"]')) continue;
       } catch {}
       if (AF.dom.isHoneypot(anchor)) {

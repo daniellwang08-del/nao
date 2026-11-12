@@ -77,6 +77,7 @@ const PLATFORM_MATCHERS = [
   ["ashby", (h) => h.includes("ashbyhq.com")],
   ["smartrecruiters", (h) => h.includes("smartrecruiters.com")],
   ["icims", (h) => h.includes("icims.com")],
+  ["dayforce", (h) => h.includes("dayforcehcm.com")],
   ["taleo", (h) => h.includes("taleo.net")],
   ["bamboohr", (h) => h.includes("bamboohr.com")],
   ["workable", (h) => h.includes("workable.com")],
@@ -292,6 +293,18 @@ export const ENGINES = {
     available: true,
     autoDiscover: true,
     note: "Uploads your resume first, then fills the candidate profile.",
+  },
+  // Dayforce (jobs.dayforcehcm.com): Ant Design candidate portal. Applies without an account, imports the resume
+  // (Dayforce parses it into the form), fills Candidate Info and every questionnaire step, then ticks the Candidate
+  // Acknowledgement; Submit is the candidate's (content/engine/dayforce.js, drivers/antd-select.js).
+  dayforce: {
+    id: "dayforce",
+    label: "Dayforce",
+    mode: "select",
+    scripts: "greenhouse",
+    available: true,
+    autoDiscover: true,
+    note: "Imports your resume, fills every step and questionnaire, and ticks the acknowledgement.",
   },
   // BambooHR (*.bamboohr.com): Fabric form (#job-application-form) with native
   // text inputs plus fab-SelectToggle dropdowns (options live on the React

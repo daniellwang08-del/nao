@@ -391,6 +391,19 @@
       const sr = srLabel(inp);
       if (sr) return sr.slice(0, 200);
     }
+    // Dayforce: labels repeat across sections ("Country", "City" in Personal Information, Employment History #1
+    // and Education History #1), so they carry their row; questionnaire questions come from the Ant form item.
+    // Options inside a radio/checkbox group keep their own text (they fall through to the wrapping label).
+    try {
+      if (AF.dayforce && AF.dayforce.isDayforcePage && AF.dayforce.isDayforcePage()) {
+        const t = (inp.type || "").toLowerCase();
+        const option = (t === "radio" || t === "checkbox") && inp.closest && inp.closest(".ant-radio-group, .ant-checkbox-group");
+        if (!option) {
+          const q = AF.dayforce.questionTitleFor(inp);
+          if (q) return q.slice(0, 200);
+        }
+      }
+    } catch {}
     // iCIMS: label[for] resolves on its own, but repeating collections reuse
     // plain names - BOTH the Phones and Addresses groups ship a required "Type"
     // dropdown - so the label must be qualified with its collection to stay

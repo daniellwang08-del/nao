@@ -672,3 +672,83 @@ export async function prepareCoverLetter(tabId) {
   await tabSend(tabId, { type: "AF_FILL_COVER_LETTER", text });
   await delay(200);
 }
+
+// ── Dayforce (jobs.dayforcehcm.com) ─────────────────────────────────────────
+// The candidate portal is one tab (frame 0) that moves Candidate Info -> Questionnaire n of N -> Submit without
+// reloading. content/engine/dayforce.js reads and drives each step; this side orders them like a candidate does:
+// apply without an account, import the resume first (Dayforce fills the form from it), fill, Next, and on the last
+// step tick the Candidate Acknowledgement. Submit stays the candidate's.
+
+export async function dayforceStage(tabId) {
+  if (tabId == null) return null;
+  const r = await tabSend(tabId, { type: "AF_DF_STAGE" }, 0);
+  return r && r.ok ? r : null;
+}
+
+// Before the first fill: the guest application, the resume import, work hours and the phone dialing code.
+export async function prepareDayforce(tabId, eng, ctx) {
+  let st = await dayforceStage(tabId);
+  if (!st && eng) {
+    // The tab was reloaded since the scripts went in.
+    await reinjectEngine(tabId, eng);
+    st = await dayforceStage(tabId);
+  }
+  if (!st) return { blocked: "Could not read the Dayforce application on this page. Reload it, then start autofill again." };
+  if (st.stage.kind === "account-choice") {
+    setAutofill({ runStatus: "Choosing Apply without an Account…" });
+    const g = await tabSend(tabId, { type: "AF_DF_GUEST" }, 0);
+    if (!g || !g.ok) return { blocked: 'Click "Apply without an Account" on the page, then start autofill again.' };
+    st = await dayforceStage(tabId);
+  }
+  if (!st || st.stage.kind !== "candidate") return { stage: st && st.stage };
+
+  const profile = await icimsProfile(ctx);
+  const country = ((profile && profile.address && profile.address.country) || "").trim() || "United States";
+
+  if (!st.imported && state.job && state.job.job_id) {
+    setAutofill({ runStatus: "Importing your resume into Dayforce…" });
+    const file = await fetchRoleFile(state.job.job_id, "resume", ".pdf,.doc,.docx", {});
+    if (!file) {
+      ctx.needsUser.push({
+        cid: "dayforce-resume",
+        label: "Resume",
+        reason: "No resume is ready for this job. Click Import Resume on the page and choose your resume.",
+      });
+    } else {
+      const imp = await tabSend(tabId, { type: "AF_DF_IMPORT", file: { name: file.filename, type: file.mime, b64: file.base64 }, timeoutMs: 60000 }, 0);
+      debugLog("[autofill] Dayforce resume import:", imp);
+      if (!imp || !imp.ok) {
+        ctx.needsUser.push({
+          cid: "dayforce-resume",
+          label: "Resume",
+          reason: (imp && imp.error) || "The resume import did not finish. Check the Resume Upload section on the page.",
+        });
+      }
+    }
+  }
+
+  setAutofill({ runStatus: "Setting work hours and phone…" });
+  const prep = await tabSend(tabId, { type: "AF_DF_PREP", country }, 0);
+  debugLog("[autofill] Dayforce prep:", prep);
+  ctx.dayforceCountry = country;
+  return { stage: st.stage };
+}
+
+// After a fill: every phone that has a number gets its dialing code (the number alone is "invalid").
+export async function dayforcePhones(tabId, ctx) {
+  try {
+    await tabSend(tabId, { type: "AF_DF_PHONES", country: (ctx && ctx.dayforceCountry) || "United States" }, 0);
+  } catch {
+    /* not on Candidate Info */
+  }
+}
+
+export async function dayforceNext(tabId) {
+  const r = await tabSend(tabId, { type: "AF_DF_NEXT", timeoutMs: 20000 }, 0);
+  return r && r.ok ? r : { advanced: false, errors: [] };
+}
+
+export async function dayforceAcknowledge(tabId) {
+  const r = await tabSend(tabId, { type: "AF_DF_ACK" }, 0);
+  return r && r.ok ? r : { ok: false };
+}

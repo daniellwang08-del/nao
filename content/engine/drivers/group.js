@@ -60,6 +60,13 @@
         if (ab && ab.length) return ab;
       }
     } catch {}
+    // Dayforce: Ant checkbox groups have no name; the group is the .ant-checkbox-group / .ant-radio-group.
+    try {
+      if (AF.dayforce && AF.dayforce.groupInputs) {
+        const df = AF.dayforce.groupInputs(root);
+        if (df && df.length) return df;
+      }
+    } catch {}
     const t = (root.type || "radio").toLowerCase();
     const name = root.name || "";
     const scope = scopeOf(root);
@@ -74,6 +81,12 @@
   function groupLabel(root) {
     const atjTitle = atjQuestionTitle(root);
     if (atjTitle) return atjTitle;
+    try {
+      if (AF.dayforce && AF.dayforce.isDayforcePage && AF.dayforce.isDayforcePage()) {
+        const q = AF.dayforce.questionTitleFor(root);
+        if (q) return q.slice(0, 200);
+      }
+    } catch {}
     const fs = root.closest && root.closest("fieldset");
     if (fs) {
       const lg = fs.querySelector("legend");
@@ -274,6 +287,10 @@
   }
 
   function optionTextFor(inp) {
+    if (AF.dayforce && AF.dayforce.optionLabelFor) {
+      const df = AF.dayforce.optionLabelFor(inp);
+      if (df) return df;
+    }
     if (AF.workable && AF.workable.optionLabelFor) {
       const wb = AF.workable.optionLabelFor(inp);
       if (wb) return wb;
@@ -354,7 +371,8 @@
           group.some((g) => g.required) ||
           !!(AF.manatal && AF.manatal.isRequiredControl && AF.manatal.isRequiredControl(root)) ||
           !!(AF.jobdiva && AF.jobdiva.isRequiredControl && AF.jobdiva.isRequiredControl(root)) ||
-          !!(AF.icims && AF.icims.isRequiredControl && AF.icims.isRequiredControl(root)),
+          !!(AF.icims && AF.icims.isRequiredControl && AF.icims.isRequiredControl(root)) ||
+          !!(AF.dayforce && AF.dayforce.isDayforcePage() && AF.dayforce.isRequiredControl(root)),
         multi: t === "checkbox" && group.length > 1 && !isExclusivePair(group),
         options: leverGroupOptions(root, group),
         name: root.name || "",
@@ -394,6 +412,17 @@
         Array.isArray(answer.option_values) && answer.option_values.length
           ? answer.option_values
           : [answer.option || answer.value].filter(Boolean);
+      // A lone checkbox ("Current Job", "Not Completed") is a yes/no question: its only option is the question
+      // itself, so a "Yes"/"No" answer never matches an option text. Tick or clear it.
+      if (t === "checkbox" && group.length === 1 && values.length === 1) {
+        const v = clean(values[0]).toLowerCase();
+        const on = /^(yes|true|on|checked|1|y)$/.test(v);
+        const off = /^(no|false|off|unchecked|0|n)$/.test(v);
+        if (on || off) {
+          if (root.checked !== on) activateOption(root);
+          return root.checked === on;
+        }
+      }
       if (exclusive) {
         // Clears the other box too, so an earlier pass that ticked both is repaired.
         const best = values.length ? bestOptionFor(group, clean(values[0]).toLowerCase()) : null;

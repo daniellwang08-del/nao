@@ -463,6 +463,14 @@
   }
 
   function findAutoContainer() {
+    // Dayforce puts each section of a step in its own <form> (Personal Information, Employment History rows,
+    // Education History rows, Work Hours): the application is the whole step, not the richest form.
+    try {
+      if (AF.dayforce && AF.dayforce.isDayforcePage() && AF.dayforce.applicationRoot) {
+        const root = AF.dayforce.applicationRoot();
+        if (root) return root;
+      }
+    } catch {}
     ensureAshbyFormVisible();
     ensureLeverApplyVisible();
     ensureJobDivaFormVisible();
@@ -2873,6 +2881,47 @@
     }
     // iCIMS "Enter Your Information" gate (email, then Next). Only the frame
     // that shows it answers.
+    // Dayforce (jobs.dayforcehcm.com): steps, resume import and the parts with fixed answers. Only the frame that
+    // is the Dayforce app answers; every action replies asynchronously.
+    if (typeof msg.type === "string" && msg.type.startsWith("AF_DF_")) {
+      const df = AF.dayforce;
+      if (!df || !df.isDayforcePage()) return false;
+      const run = async () => {
+        switch (msg.type) {
+          case "AF_DF_STAGE":
+            return { ok: true, stage: df.stage(), imported: df.resumeImported() };
+          case "AF_DF_GUEST":
+            return df.applyAsGuest();
+          case "AF_DF_IMPORT":
+            return df.importResume(msg.file || {}, { timeoutMs: msg.timeoutMs || 60000 });
+          case "AF_DF_PREP": {
+            const hours = await df.prepareWorkHours(msg.hours || {});
+            const phones = await df.prepareDialCodes(msg.country, { onlyFilled: false });
+            return { ok: true, hours, phones };
+          }
+          case "AF_DF_PHONES":
+            return { ok: true, ...(await df.prepareDialCodes(msg.country, { onlyFilled: true })) };
+          case "AF_DF_NEXT":
+            return { ok: true, ...(await df.next({ timeoutMs: msg.timeoutMs || 20000 })) };
+          case "AF_DF_ACK":
+            return df.acknowledge();
+          default:
+            return { ok: false, error: "unknown Dayforce action" };
+        }
+      };
+      run()
+        .then((res) => {
+          try {
+            sendResponse(res);
+          } catch {}
+        })
+        .catch((e) => {
+          try {
+            sendResponse({ ok: false, error: String((e && e.message) || e) });
+          } catch {}
+        });
+      return true;
+    }
     if (msg.type === "AF_ICIMS_GATE") {
       if (!AF.icims || !AF.icims.emailGateState) return false;
       const st = AF.icims.emailGateState();

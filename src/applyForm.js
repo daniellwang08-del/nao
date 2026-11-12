@@ -10,7 +10,9 @@
 const APPLY_WORDS =
   "apply|apply now|apply here|apply online|apply today|easy apply|quick apply|" +
   "apply (to|for) (this |the )?(job|position|role|opening|vacancy)( online| now)?|" +
-  "start (your |my )?application|begin (your )?application|i'?m interested|apply on (the )?company (site|website)";
+  "start (your |my )?application|begin (your )?application|i'?m interested|apply on (the )?company (site|website)|" +
+  // Guest application next to sign-in / create-account choices (Dayforce: "Apply without an Account").
+  "apply without (an |a )?(account|signing in|registering|registration)|apply as (a )?guest|continue as (a )?guest";
 const APPLY_TRAIL = "arrow_[a-z_]+|chevron_right|navigate_next|open_in_new|launch|north_east|east|\\(?opens? in (a )?new (tab|window)\\)?";
 export const APPLY_TEXT = `^[^a-z0-9']*(${APPLY_WORDS})([^a-z0-9']+(${APPLY_TRAIL}))*[^a-z0-9']*$`;
 // Apply buttons that lead to a sign-in or another site's profile instead.
