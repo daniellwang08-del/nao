@@ -43,6 +43,7 @@ import {
   oracleProfileItems,
   oracleSign,
   oracleStage,
+  oracleWorkPreferences,
   prepareOracle,
   prepareOracleContact,
 } from "./platforms.js";
@@ -1517,6 +1518,7 @@ async function runAutofillPass() {
         await prepareOracleContact(tabId, ctx);
         setAutofill({ runStatus: `${name}: reading the fields…` });
         if (await rediscoverForm(tabId, 6000)) lastSpecs = await fillCurrentPage(tabId, eng, ctx, false);
+        await oracleWorkPreferences(tabId, ctx);
         if (cur.profileBlocks) await oracleProfileItems(tabId, ctx);
         await oracleSign(tabId, ctx);
         const after = (await oracleStage(tabId)) || cur;

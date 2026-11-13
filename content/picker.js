@@ -2975,6 +2975,8 @@
           }
           case "AF_ORC_SIGN":
             return orc.sign(msg.fullName || "");
+          case "AF_ORC_WORKPREF":
+            return orc.workPreferences({ country: msg.country || "" });
           case "AF_ORC_NEXT":
             return { ok: true, ...(await orc.next({ timeoutMs: msg.timeoutMs || 25000 })) };
           default:

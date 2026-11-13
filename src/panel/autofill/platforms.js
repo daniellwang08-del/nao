@@ -1161,6 +1161,15 @@ export async function oracleProfileItems(tabId, ctx) {
   }
 }
 
+// Currency Code and Pay Frequency appear (required) once a salary is entered; fill whichever the answers left empty.
+export async function oracleWorkPreferences(tabId, ctx) {
+  const profile = await icimsProfile(ctx);
+  const country = ((profile && profile.address && profile.address.country) || "").trim() || "United States";
+  const r = await tabSend(tabId, { type: "AF_ORC_WORKPREF", country }, 0);
+  debugLog("[autofill] Oracle work preferences:", r);
+  return r || { ok: false };
+}
+
 export async function oracleSign(tabId, ctx) {
   const profile = await icimsProfile(ctx);
   const name = (profile && profile.name) || {};

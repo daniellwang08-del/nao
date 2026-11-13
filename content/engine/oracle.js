@@ -202,6 +202,57 @@
     return scored.length ? scored[0].o : null;
   }
 
+  const CURRENCIES = {
+    USD: ["US Dollar", "United States Dollar", "U.S. Dollar"], EUR: ["Euro"], GBP: ["Pound Sterling", "British Pound"],
+    CAD: ["Canadian Dollar"], AUD: ["Australian Dollar"], NZD: ["New Zealand Dollar"], INR: ["Indian Rupee"],
+    JPY: ["Yen", "Japanese Yen"], CNY: ["Yuan Renminbi", "Chinese Yuan"], MXN: ["Mexican Peso"], CHF: ["Swiss Franc"],
+    SGD: ["Singapore Dollar"], HKD: ["Hong Kong Dollar"], BRL: ["Brazilian Real"], ZAR: ["Rand", "South African Rand"],
+    PHP: ["Philippine Peso"], PLN: ["Zloty", "Polish Zloty"], SEK: ["Swedish Krona"], NOK: ["Norwegian Krone"], DKK: ["Danish Krone"],
+    AED: ["UAE Dirham"], SAR: ["Saudi Riyal"], ILS: ["New Israeli Sheqel", "Israeli Shekel"], KRW: ["Won", "South Korean Won"],
+  };
+  const COUNTRY_CURRENCY = {
+    "united states": "USD", canada: "CAD", "united kingdom": "GBP", australia: "AUD", "new zealand": "NZD", india: "INR",
+    japan: "JPY", china: "CNY", mexico: "MXN", switzerland: "CHF", singapore: "SGD", "hong kong": "HKD", brazil: "BRL",
+    "south africa": "ZAR", philippines: "PHP", poland: "PLN", sweden: "SEK", norway: "NOK", denmark: "DKK",
+    germany: "EUR", france: "EUR", ireland: "EUR", netherlands: "EUR", spain: "EUR", italy: "EUR", portugal: "EUR",
+    belgium: "EUR", austria: "EUR", finland: "EUR",
+  };
+  const FREQUENCIES = [
+    [/^(yearly|year|annual|annually|per (year|annum)|a year|salary|salaried)$/, ["Yearly", "Annual", "Annually", "Per Year"]],
+    [/^(hourly|per hour|an hour|hour)$/, ["Hourly", "Per Hour"]],
+    [/^(bi ?weekly|every (two|2) weeks|fortnightly)$/, ["Biweekly", "Bi-Weekly", "Every Two Weeks"]],
+    [/^(semi ?monthly|twice a month)$/, ["Semi-Monthly", "Semimonthly"]],
+    [/^(monthly|per month|a month)$/, ["Monthly"]],
+    [/^(weekly|per week|a week)$/, ["Weekly"]],
+    [/^(daily|per day|a day)$/, ["Daily"]],
+  ];
+
+  // The answer and the other words a list may use for it ("USD" -> "US Dollar", "Annually" -> "Yearly").
+  function alternatives(want) {
+    const w = clean(String(want || ""));
+    const out = [w];
+    const code = (w.match(/^([A-Za-z]{3})$/) || w.match(/\(([A-Z]{3})\)/) || w.match(/^([A-Z]{3})\b/) || [])[1];
+    if (code && CURRENCIES[code.toUpperCase()]) out.push(...CURRENCIES[code.toUpperCase()]);
+    for (const names of Object.values(CURRENCIES)) if (names.some((n) => norm(n) === norm(w))) out.push(...names);
+    const n = norm(w).replace(/-/g, " ");
+    for (const [re, names] of FREQUENCIES) if (re.test(n)) out.push(...names);
+    return [...new Set(out.filter(Boolean))];
+  }
+
+  function bestAlt(items, want, textFn = (x) => x) {
+    const alts = alternatives(want);
+    // An exact option for any of the words beats a loose match ("Bi-weekly" is "Biweekly", not "Weekly").
+    for (const w of alts) {
+      const exact = items.find((it) => norm(textFn(it)).replace(/ /g, "") === norm(w).replace(/ /g, ""));
+      if (exact) return exact;
+    }
+    for (const w of alts) {
+      const o = bestText(items, w, textFn);
+      if (o) return o;
+    }
+    return null;
+  }
+
   function searchTerms(want) {
     const w = clean(String(want || ""));
     const alias = ALIASES[norm(w)];
@@ -209,14 +260,18 @@
     return [...new Set([w, alias, words.slice(0, 2).join(" "), words[0]].filter((t) => t && t.length >= 1))];
   }
 
+  const itemsKey = (input) => cxItems(input).map(cxItemText).join("|");
+
+  // Type a search. Local lists filter at once; server lists (address search, postal codes, cities) debounce about
+  // 500 ms, show a loading row, then their suggestions, so wait for the list to change and finish loading.
   async function cxType(input, text) {
+    const before = itemsKey(input);
     focusIn(input);
     setNativeValue(input, text);
     input.dispatchEvent(new InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }));
-    // React debounces async lists by 500 ms; the list then shows a loading row.
-    await delay(cxAutoSuggest(input) ? 650 : 120);
-    await waitUntil(() => !cxLoading(input), 6000, 100);
-    await delay(80);
+    await waitUntil(() => cxLoading(input) || itemsKey(input) !== before, 1800, 60);
+    await waitUntil(() => !cxLoading(input), 10000, 100);
+    await delay(120);
   }
 
   async function cxClickItem(input, item) {
@@ -236,7 +291,7 @@
   async function cxPick(input, want, { match = null, freeText = null } = {}) {
     if (!input || want == null || want === "") return false;
     if (input.readOnly || input.disabled) return false;
-    const chooser = (items) => (match ? match(items, cxItemText) : bestText(items, want, cxItemText));
+    const chooser = (items) => (match ? match(items, cxItemText) : bestAlt(items, want, cxItemText));
     const current = clean(input.value);
     if (current && !cxAutoSuggest(input) && chooser([{ textContent: current, innerText: current, querySelector: () => null }])) {
       return true;
@@ -245,7 +300,8 @@
     let item = null;
     if (!cxAutoSuggest(input) && (await cxOpenList(input))) item = chooser(cxItems(input));
     if (!item) {
-      for (const term of searchTerms(want)) {
+      const terms = [...new Set(alternatives(want).flatMap(searchTerms))];
+      for (const term of terms) {
         await cxType(input, term);
         item = chooser(cxItems(input));
         if (item || allowFree) break;
@@ -302,7 +358,7 @@
     const btns = pillButtons(ul);
     let ok = true;
     for (const w of multi ? wants : wants.slice(0, 1)) {
-      const b = bestText(btns, yesNo(w) || w, pillText);
+      const b = bestAlt(btns, yesNo(w) || w, pillText);
       if (!b) {
         ok = false;
         continue;
@@ -953,7 +1009,13 @@
     }
     const fresh = addressBlock() || block;
     const l1 = rowByLabel(fresh, /address line 1|street|^address$/i);
-    if (l1 && line1) done.line1 = await typeText(l1.querySelector("input, textarea"), line1);
+    const l1Input = l1 && l1.querySelector("input, textarea");
+    if (l1Input && line1) {
+      if (l1Input.classList.contains("cx-select-input") && !cxAutoSuggest(l1Input)) {
+        done.line1 = await pickAddress(l1Input, { line1, city, state, postalCode });
+        await delay(1200); // the picked address fills the fields below
+      } else done.line1 = await typeText(l1Input, line1);
+    }
     const l2 = rowByLabel(fresh, /address line 2/i);
     if (l2) {
       const i2 = l2.querySelector("input, textarea");
@@ -965,10 +1027,12 @@
       if (i3 && clean(i3.value)) done.line3 = await typeText(i3, "");
     }
     const stateAbbr = US_STATES[norm(state)] || (/^[A-Za-z]{2}$/.test(state) ? state.toUpperCase() : "");
+    const stateFull = norm(stateName(state));
     const placeMatcher = (items, textFn) => {
       const want = items.filter((it) => {
         const t = ` ${norm(textFn(it))} `;
-        return (!city || t.includes(` ${norm(city)} `)) && (!state || t.includes(` ${norm(state)} `) || (stateAbbr && t.includes(` ${stateAbbr.toLowerCase()} `)));
+        const stateHit = !state || t.includes(` ${norm(state)} `) || (stateAbbr && t.includes(` ${stateAbbr.toLowerCase()} `)) || (stateFull && t.includes(` ${stateFull} `));
+        return (!city || t.includes(` ${norm(city)} `)) && stateHit;
       });
       return want[0] || null;
     };
@@ -991,11 +1055,77 @@
         ? await cxPick(stateInput, stateName(state), { match: stateMatcher(state) })
         : await typeText(stateInput, state);
     } else if (stateInput) done.state = !!clean(stateInput.value);
+    const countyRow = rowByLabel(fresh, /^county/i);
+    const countyInput = countyRow && countyRow.querySelector("input.cx-select-input");
+    if (countyInput) {
+      if (!clean(countyInput.value) && (await cxOpenList(countyInput))) {
+        const items = cxItems(countyInput);
+        if (items.length === 1) await cxClickItem(countyInput, items[0]);
+        await cxClose(countyInput);
+      }
+      done.county = !!clean(countyInput.value) || !countyRow.querySelector(".input-row__label--required, .cx-select__label--required");
+    }
     const ok = Object.values(done).every(Boolean);
     return { ok, present: true, done };
   }
 
   // "WA", "Washington" and "Washington (WA)" are the same state.
+  // Street words as an address list writes them ("Southeast" = "SE", "Place" = "PL").
+  const STREET_WORDS = {
+    north: "n", south: "s", east: "e", west: "w", northeast: "ne", northwest: "nw", southeast: "se", southwest: "sw",
+    street: "st", avenue: "ave", av: "ave", road: "rd", drive: "dr", place: "pl", lane: "ln", court: "ct", boulevard: "blvd",
+    parkway: "pkwy", highway: "hwy", circle: "cir", terrace: "ter", trail: "trl", way: "way", square: "sq", apartment: "apt",
+    suite: "ste",
+  };
+  const streetTokens = (s) => norm(s).split(" ").filter(Boolean).map((w) => STREET_WORDS[w] || w);
+
+  // The suggestion that is this address: same house number, the most street words, then the postal code and city.
+  function addressMatcher({ line1, city, state, postalCode }) {
+    const want = streetTokens(line1);
+    const house = want.find((w) => /^\d+[a-z]?$/.test(w)) || "";
+    const abbr = (US_STATES[norm(state)] || (/^[A-Za-z]{2}$/.test(state || "") ? state : "")).toLowerCase();
+    const full = norm(stateName(state));
+    return (items, textFn) => {
+      let best = null;
+      let bestScore = 0;
+      for (const it of items) {
+        const toks = streetTokens(textFn(it));
+        const t = ` ${toks.join(" ")} `;
+        if (house && !toks.includes(house)) continue;
+        const street = want.filter((w) => w !== house && toks.includes(w)).length;
+        if (!street) continue;
+        let score = street * 2;
+        if (postalCode && t.includes(` ${norm(postalCode).split(" ")[0]} `)) score += 3;
+        if (city && t.includes(` ${norm(city)} `)) score += 2;
+        if ((abbr && t.includes(` ${abbr} `)) || (full && t.includes(` ${full} `))) score += 1;
+        if (score > bestScore) {
+          bestScore = score;
+          best = it;
+        }
+      }
+      return best;
+    };
+  }
+
+  async function pickAddress(input, addr) {
+    const match = addressMatcher(addr);
+    if (clean(input.value) && match([{ textContent: input.value, innerText: input.value, querySelector: () => null }], (x) => x.innerText)) return true;
+    const terms = [addr.line1, [addr.line1, addr.city].filter(Boolean).join(" "), streetTokens(addr.line1).slice(0, 3).join(" ")];
+    for (const term of [...new Set(terms.filter(Boolean))]) {
+      await cxType(input, term);
+      const item = match(cxItems(input), cxItemText);
+      if (item) {
+        await cxClickItem(input, item);
+        await cxClose(input);
+        return !!clean(input.value);
+      }
+    }
+    // No suggestion is this address: leave the box empty rather than half-typed.
+    await cxType(input, "");
+    await cxClose(input);
+    return false;
+  }
+
   function stateMatches(text, state, abbr) {
     const t = norm(text);
     if (!t) return false;
@@ -1023,6 +1153,30 @@
     pennsylvania: "PA", "rhode island": "RI", "south carolina": "SC", "south dakota": "SD", tennessee: "TN", texas: "TX", utah: "UT",
     vermont: "VT", virginia: "VA", washington: "WA", "west virginia": "WV", wisconsin: "WI", wyoming: "WY",
   };
+
+  // Currency Code from the candidate's country and, with a yearly salary, Pay Frequency "Yearly", when still empty.
+  async function workPreferences({ country = "" } = {}) {
+    const out = {};
+    const scope = document;
+    const salaryRow = rowByLabel(scope, /salary|minimum pay|expected pay|compensation/i);
+    const salaryInput = salaryRow && salaryRow.querySelector("input:not(.cx-select-input)");
+    const salary = salaryInput ? Number(String(salaryInput.value || "").replace(/[^\d.]/g, "")) : 0;
+    const curRow = [...scope.querySelectorAll(".input-row")].find((r) => /currency/i.test(textOf(r.querySelector("label, .input-row__label"))) && shown(r));
+    const curInput = curRow && curRow.querySelector("input.cx-select-input");
+    if (curInput && !clean(curInput.value)) {
+      const code = COUNTRY_CURRENCY[ALIASES[norm(country)] || norm(country)] || "USD";
+      out.currency = await cxPick(curInput, code);
+    }
+    const freqRow = [...scope.querySelectorAll(".input-row")].find((r) => /pay frequency|frequency/i.test(textOf(r.querySelector("label, .input-row__label"))) && shown(r));
+    if (freqRow && salary) {
+      const pills = freqRow.querySelector("ul.cx-select-pills-container");
+      const cx = freqRow.querySelector("input.cx-select-input");
+      const want = salary >= 1000 ? "Yearly" : "Hourly";
+      if (pills && !pillButtons(pills).some(pillSelected)) out.frequency = await pickPill(pills, want);
+      else if (cx && !clean(cx.value)) out.frequency = await cxPick(cx, want);
+    }
+    return { ok: Object.values(out).every(Boolean), done: out };
+  }
 
   function esignInput() {
     const box = [...document.querySelectorAll(".apply-flow-esign, .esign-form")].find(shown);
@@ -1124,6 +1278,7 @@
     setPhone,
     setAddress,
     sign,
+    workPreferences,
     next,
     visibleErrors,
     shouldSkipControl,
@@ -1133,6 +1288,6 @@
     // widgets, for the drivers
     cx: { isCxInput, pick: cxPick, options: cxOptions, autoSuggest: cxAutoSuggest },
     pills: { buttons: pillButtons, text: pillText, selected: pillSelected, pick: pickPill },
-    _test: { parseMonthYear, degreeLevel, bestText, norm, splitLocation },
+    _test: { parseMonthYear, degreeLevel, bestText, norm, splitLocation, alternatives, addressMatcher, bestAlt },
   };
 })();

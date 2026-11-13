@@ -134,3 +134,31 @@ test("discovery targets the Greenhouse embed only when there is one; other pages
   ];
   assert.equal(pickGreenhouseFrame(gh).frameId, 4);
 });
+
+test("answers in other words still find Oracle's options: currency codes and pay frequencies", () => {
+  const { bestAlt } = oracle()._test;
+  const currencies = ["Australian Dollar", "Canadian Dollar", "Euro", "Pound Sterling", "US Dollar", "Yen"];
+  assert.equal(bestAlt(currencies, "USD"), "US Dollar");
+  assert.equal(bestAlt(currencies, "United States Dollar"), "US Dollar");
+  assert.equal(bestAlt(currencies, "GBP"), "Pound Sterling");
+  const freq = ["Daily", "Weekly", "Biweekly", "Monthly", "Yearly", "monthly over 13 times a year", "monthly over 12 times a year", "Semi-Monthly"];
+  assert.equal(bestAlt(freq, "Annually"), "Yearly");
+  assert.equal(bestAlt(freq, "Annual"), "Yearly");
+  assert.equal(bestAlt(freq, "Bi-weekly"), "Biweekly");
+  assert.equal(bestAlt(freq, "Twice a month"), "Semi-Monthly");
+  assert.equal(bestAlt(freq, "Monthly"), "Monthly");
+});
+
+test("the address search picks the suggestion that is the candidate's address", () => {
+  const { addressMatcher } = oracle()._test;
+  const pick = addressMatcher({ line1: "4410 128th Place Southeast", city: "Kent", state: "WA", postalCode: "98030" });
+  const items = [
+    "4410 128TH SE PLACE, KENT, WASHINGTON",
+    "4410 128TH SE PLACE, KENT, WASHINGTON, 98030",
+    "4410 128TH SE PL, SEATTLE METRO AREA, WASHINGTON",
+    "4410 148th Pl SE, KENT, WASHINGTON",
+    "4410 128TH SE PLACE, SEATTLE METRO AREA, WASHINGTON, 98030",
+  ];
+  assert.equal(pick(items, (x) => x), "4410 128TH SE PLACE, KENT, WASHINGTON, 98030");
+  assert.equal(pick(["9 OTHER ST, KENT, WASHINGTON"], (x) => x), null);
+});
