@@ -45,10 +45,11 @@ export async function broadcastTabMessage(tabId, msg) {
   return out;
 }
 
-/** Pick the Greenhouse application iframe when present. */
+/** Pick the Greenhouse application iframe when present; null on every other page (the caller then asks every
+ *  frame, e.g. the iCIMS portal whose form lives in its #icims_content_iframe). */
 export function pickGreenhouseFrame(frames) {
   let best = null;
-  let bestScore = -1;
+  let bestScore = 0;
   for (const f of frames || []) {
     const url = (f.url || "").toLowerCase();
     if (!url || url.startsWith("about:")) continue;

@@ -178,6 +178,9 @@ attachBrowserSync();
 // timers, the service worker's are not.
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "af-timers" || !port.sender || port.sender.id !== chrome.runtime.id) return;
+  // The page closing, navigating or entering the back/forward cache closes the port; read the reason so Chrome does
+  // not report it as an unchecked runtime.lastError.
+  port.onDisconnect.addListener(() => void chrome.runtime.lastError);
   port.onMessage.addListener((m) => {
     if (!m || typeof m.id !== "number") return;
     const ms = Math.min(Math.max(0, Number(m.ms) || 0), 60_000);

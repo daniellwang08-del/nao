@@ -117,3 +117,20 @@ test("auto-apply lists Oracle (and Dayforce, ADP) as their own sites and queues 
   const ranked = rankJobs([{ id: "o1", url, title: "Software Engineer III" }], { allowed: new Set(Object.keys(EASE_TIER)) });
   assert.deepEqual(ranked.map((r) => [r.id, r.platform]), [["o1", "oracle"]]);
 });
+
+test("discovery targets the Greenhouse embed only when there is one; other pages ask every frame (iCIMS portal iframe)", async () => {
+  const { pickGreenhouseFrame } = await import("../src/tab-messaging.js");
+  // careers-usa-pro-cbi.icims.com: the portal page, the form in #icims_content_iframe.
+  const icims = [
+    { frameId: 0, parentFrameId: -1, url: "https://careers-usa-pro-cbi.icims.com/jobs/4221/data-engineer/candidate?from=login&eem=x&code=y" },
+    { frameId: 7, parentFrameId: 0, url: "https://careers-usa-pro-cbi.icims.com/jobs/4221/data-engineer/candidate?from=login&in_iframe=1" },
+    { frameId: 9, parentFrameId: 0, url: "about:blank" },
+  ];
+  assert.equal(pickGreenhouseFrame(icims), null);
+  assert.equal(pickGreenhouseFrame([{ frameId: 0, url: "https://jobs.lever.co/x/y/apply" }]), null);
+  const gh = [
+    { frameId: 0, url: "https://www.example.com/careers/123" },
+    { frameId: 4, url: "https://job-boards.greenhouse.io/embed/job_app?for=example&token=123" },
+  ];
+  assert.equal(pickGreenhouseFrame(gh).frameId, 4);
+});

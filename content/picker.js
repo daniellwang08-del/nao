@@ -1849,8 +1849,8 @@
     let n = 0;
     // Optional fields first; required Title last (see education note above).
     if (e.company && (await wbSetField(editor.querySelector('[name="company"]'), e.company))) n++;
+    // Industry is optional on Workable and NAO's profile has none, so it is usually left empty.
     if (e.industry && (await wbSetField(editor.querySelector('[name="industry"]'), e.industry))) n++;
-    else if (!e.industry) console.warn("[autofill] WB industry SKIPPED, empty payload (API has no industry)");
     if (e.description && (await wbSetField(editor.querySelector('textarea[name="summary"]'), e.description))) n++;
     // Re-assert the optional fields on the now-stable editor before save so a
     // value React cleared on the first write is recovered (idempotent otherwise).
