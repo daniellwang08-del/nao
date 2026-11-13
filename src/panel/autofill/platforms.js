@@ -752,3 +752,130 @@ export async function dayforceAcknowledge(tabId) {
   const r = await tabSend(tabId, { type: "AF_DF_ACK" }, 0);
   return r && r.ok ? r : { ok: false };
 }
+
+// ── ADP Workforce Now (workforcenow.adp.com) ─────────────────────────────────
+// The candidate flow, ordered like a candidate does it: Apply, "Consent & Continue", "Tell us about yourself"
+// (name, email, mobile) and Continue, the verification code sent to the email and read from the connected inbox,
+// then the "Applying for ..." wizard (filled step by step by the run) up to Self-Attest.
+
+export async function adpStage(tabId) {
+  if (tabId == null) return null;
+  const r = await tabSend(tabId, { type: "AF_ADP_STAGE" }, 0);
+  return r && r.ok ? r.stage : null;
+}
+
+const ADP_CODE_WAIT_MS = 150_000;
+
+// "+<country code><number>" for ADP's mobile box: a stored "+1 253-220-9979" or "2532209979" with code 1 both
+// become "+12532209979" (never the code twice).
+export function adpPhone(phone, countryCode) {
+  let digits = String(phone || "").replace(/\D/g, "");
+  if (!digits) return "";
+  const cc = String(countryCode || "").replace(/\D/g, "");
+  if (cc && !(digits.startsWith(cc) && digits.length > 10)) digits = cc + digits;
+  else if (!cc && digits.length === 10) digits = "1" + digits;
+  return "+" + digits;
+}
+
+// Walk the gates until the wizard (or the attestation) is open. Returns { stage } or { blocked }.
+export async function prepareAdp(tabId, eng, ctx) {
+  let st = await adpStage(tabId);
+  if (!st && eng) {
+    await reinjectEngine(tabId, eng);
+    st = await adpStage(tabId);
+  }
+  if (!st) return { blocked: "Could not read the ADP application on this page. Reload it, then start autofill again." };
+  const profile = await icimsProfile(ctx);
+  const name = (profile && profile.name) || {};
+  const contact = (profile && profile.contact) || {};
+  const company = (state.job && state.job.company) || "";
+  let sentAt = 0;
+  let challengeAsked = false;
+  for (let hop = 0; hop < 12; hop++) {
+    st = (await adpStage(tabId)) || st;
+    if (st.kind === "wizard" || st.kind === "attest" || st.kind === "submitted") return { stage: st };
+    if (st.challenge) {
+      if (!challengeAsked) setAutofill({ runStatus: "ADP shows a quick check (reCAPTCHA). Complete it on the page and autofill continues." });
+      challengeAsked = true;
+      await delay(2000);
+      continue;
+    }
+    if (st.kind === "posting") {
+      setAutofill({ runStatus: "Opening the application…" });
+      await tabSend(tabId, { type: "AF_ADP_APPLY" }, 0);
+    } else if (st.kind === "consent") {
+      setAutofill({ runStatus: "Accepting the privacy notice…" });
+      await tabSend(tabId, { type: "AF_ADP_CONSENT" }, 0);
+    } else if (st.kind === "login") {
+      setAutofill({ runStatus: "Entering your name, email and mobile…" });
+      const phone = adpPhone(contact.phone, contact.phoneCountryCode);
+      const r = await tabSend(tabId, {
+        type: "AF_ADP_LOGIN",
+        person: { firstName: name.first || "", lastName: name.last || "", email: contact.email || "", phone },
+      }, 0);
+      if (!r || !r.ok) return { blocked: (r && r.error) || "Could not fill ADP's sign-in details. Fill them on the page, click Continue, then start autofill again." };
+    } else if (st.kind === "otp-method") {
+      setAutofill({ runStatus: "Asking ADP to email the verification code…" });
+      sentAt = Date.now();
+      const r = await tabSend(tabId, { type: "AF_ADP_SEND_CODE", email: contact.email || "" }, 0);
+      if (!r || !r.ok) return { blocked: (r && r.error) || "Choose your email on the page and click Send, then start autofill again." };
+    } else if (st.kind === "otp-code") {
+      const res = await enterAdpCode(tabId, company, sentAt || Date.now() - 120_000);
+      if (res.blocked) return res;
+    } else {
+      await delay(1500);
+    }
+  }
+  st = await adpStage(tabId);
+  if (st && (st.kind === "wizard" || st.kind === "attest")) return { stage: st };
+  return { blocked: "ADP did not open the application. Finish the step on the page, then start autofill again." };
+}
+
+// The code ADP emailed, from the connected inbox; the candidate types it when the inbox is not connected.
+async function enterAdpCode(tabId, company, sentAtMs) {
+  const since = Math.floor(sentAtMs / 1000) - 5; // only mail sent after Send
+  const tried = [];
+  const started = Date.now();
+  setAutofill({ runStatus: "Waiting for the verification code in your email…" });
+  while (Date.now() - started < ADP_CODE_WAIT_MS) {
+    let res = null;
+    try {
+      res = await api.getVerificationCode({ since, company: company || undefined, exclude: tried });
+    } catch {
+      res = null;
+    }
+    if (res && res.connected === false) break;
+    if (res && res.code) {
+      tried.push(res.code);
+      setAutofill({ runStatus: `Entering the code from ${res.from || "your email"}…` });
+      const r = await tabSend(tabId, { type: "AF_ADP_ENTER_CODE", code: res.code }, 0);
+      if (r && r.ok) return { ok: true };
+      setAutofill({ runStatus: "That code was not accepted, waiting for a newer one…" });
+    }
+    const st = await adpStage(tabId);
+    if (st && st.kind !== "otp-code") return { ok: true }; // the candidate entered it
+    await delay(4000);
+  }
+  // No inbox (or no code): the candidate enters it; continue as soon as the page moves on.
+  setAutofill({ runStatus: "Enter the verification code from your email on the page. Autofill continues after Verify." });
+  const end = Date.now() + 180_000;
+  while (Date.now() < end) {
+    const st = await adpStage(tabId);
+    if (st && st.kind !== "otp-code") return { ok: true };
+    await delay(2000);
+  }
+  return { blocked: "Enter the verification code ADP emailed you and click Verify, then start autofill again. Connect your inbox in NAO to have this done for you." };
+}
+
+export async function adpNext(tabId) {
+  const r = await tabSend(tabId, { type: "AF_ADP_NEXT", timeoutMs: 25000 }, 0);
+  return r && r.ok ? r : { advanced: false, errors: [] };
+}
+
+export async function adpAttest(tabId, ctx) {
+  const profile = await icimsProfile(ctx);
+  const name = (profile && profile.name) || {};
+  const fullName = [name.first, name.middle, name.last].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+  const r = await tabSend(tabId, { type: "AF_ADP_ATTEST", fullName }, 0);
+  return r || { ok: false };
+}

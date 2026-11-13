@@ -131,6 +131,7 @@ const ENGINE_SCRIPTS = {
     "content/engine/ashby.js",
     "content/engine/icims.js",
     "content/engine/dayforce.js",
+    "content/engine/adp.js",
     "content/engine/drivers/antd-select.js",
     "content/engine/drivers/sr-select.js",
     "content/engine/drivers/icims-dropdown.js",

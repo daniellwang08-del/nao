@@ -208,6 +208,23 @@
       el.focus({ preventScroll: true });
       focused = document.activeElement === el;
     } catch {}
+    // An unfocused page (background tab) fires no focus events: components that keep text only while focused
+    // (ADP's MDFTextbox) would drop the value. Announce the focus (page-bridge.js does the same).
+    // (activeElement still moves in an unfocused page, so ask the document, not the element.)
+    const pageFocused = (() => {
+      try {
+        return document.hasFocus();
+      } catch {
+        return true;
+      }
+    })();
+    if (!focused || !pageFocused) {
+      try {
+        el.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+        el.dispatchEvent(new FocusEvent("focus", { bubbles: false }));
+      } catch {}
+      focused = false; // so the end announces the blur too (blur() fires nothing either)
+    }
     const lastValue = el.value;
     setNativeValue(el, v);
     const tracker = el._valueTracker;

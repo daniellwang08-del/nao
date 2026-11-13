@@ -470,6 +470,11 @@
         const root = AF.dayforce.applicationRoot();
         if (root) return root;
       }
+      // ADP: the "Applying for ..." step dialog holds the step's fields.
+      if (AF.adp && AF.adp.isAdpPage() && AF.adp.applicationRoot) {
+        const root = AF.adp.applicationRoot();
+        if (root) return root;
+      }
     } catch {}
     ensureAshbyFormVisible();
     ensureLeverApplyVisible();
@@ -2907,6 +2912,45 @@
             return df.acknowledge();
           default:
             return { ok: false, error: "unknown Dayforce action" };
+        }
+      };
+      run()
+        .then((res) => {
+          try {
+            sendResponse(res);
+          } catch {}
+        })
+        .catch((e) => {
+          try {
+            sendResponse({ ok: false, error: String((e && e.message) || e) });
+          } catch {}
+        });
+      return true;
+    }
+    // ADP Workforce Now: consent, sign-in details, emailed code, wizard steps and the attestation.
+    if (typeof msg.type === "string" && msg.type.startsWith("AF_ADP_")) {
+      const adp = AF.adp;
+      if (!adp || !adp.isAdpPage()) return false;
+      const run = async () => {
+        switch (msg.type) {
+          case "AF_ADP_STAGE":
+            return { ok: true, stage: adp.stage() };
+          case "AF_ADP_APPLY":
+            return adp.apply();
+          case "AF_ADP_CONSENT":
+            return adp.consent();
+          case "AF_ADP_LOGIN":
+            return adp.login(msg.person || {});
+          case "AF_ADP_SEND_CODE":
+            return adp.sendCodeByEmail(msg.email || "");
+          case "AF_ADP_ENTER_CODE":
+            return adp.enterCode(msg.code || "");
+          case "AF_ADP_NEXT":
+            return { ok: true, ...(await adp.next({ timeoutMs: msg.timeoutMs || 25000 })) };
+          case "AF_ADP_ATTEST":
+            return adp.attest(msg.fullName || "");
+          default:
+            return { ok: false, error: "unknown ADP action" };
         }
       };
       run()

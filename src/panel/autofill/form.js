@@ -34,6 +34,10 @@ import {
   dayforcePhones,
   dayforceStage,
   prepareDayforce,
+  adpAttest,
+  adpNext,
+  adpStage,
+  prepareAdp,
 } from "./platforms.js";
 import {
   autofillFrameId,
@@ -147,7 +151,8 @@ export async function startAutofill({ tab: targetTab = null, headless = false, r
     }
     if (!headless && !reached) void checkAppliedAlongside();
     // A description page: open the application first (JobDiva does its own).
-    if (engine.mode !== "workday" && engine.platform !== "jobdiva" && !reached) {
+    // ADP walks its own gates (consent, sign-in details, emailed code) in the run (prepareAdp).
+    if (engine.mode !== "workday" && engine.platform !== "jobdiva" && engine.platform !== "adp" && !reached) {
       if (!headless) toast("Opening the application form…");
       const hop = await reachApplicationForm(tab.id, { waitMs: headless ? 25_000 : 15_000, focus: focusGate() });
       if (!hop.tab) return fail("The application tab was closed.");
@@ -765,6 +770,7 @@ const BZY_MAX_PAGES = 6; // Breezy.hr multi-step applications: hard cap on secti
 const JV_MAX_PAGES = 6; // Jobvite multi-step applications: hard cap on steps
 const ICIMS_MAX_PAGES = 10; // iCIMS itineraries are typically 3-5 steps; cap well above
 const DAYFORCE_MAX_STEPS = 12; // Candidate Info + up to ~8 questionnaires + Submit
+const ADP_MAX_STEPS = 14; // Personal Information, Resume, Questions (1..n), Voluntary Self-ID, Review, Self-Attest
 
 // Re-run auto-discovery on the current page and wait for the application
 // container to register. Used between SmartRecruiters steps: after clicking
@@ -1435,7 +1441,65 @@ async function runAutofillPass() {
       }
     }
 
-    let lastSpecs = dayforceStart && dayforceStart.kind === "submit" ? [] : await fillCurrentPage(tabId, eng, ctx, true);
+    // ADP: Apply, consent, sign-in details and the emailed code first; the wizard step is read after.
+    let adpStart = null;
+    if (eng && eng.platform === "adp") {
+      const prep = await prepareAdp(tabId, eng, ctx);
+      if (prep.blocked) {
+        setAutofill({ running: false, runStatus: null, error: prep.blocked });
+        return;
+      }
+      adpStart = prep.stage || null;
+      if (adpStart && adpStart.kind === "wizard" && adpStart.step !== "Review Your Application") {
+        setAutofill({ runStatus: "Reading the form…" });
+        const found = await rediscoverForm(tabId);
+        if (!found || !state.autofill.fields.length) {
+          setAutofill({ running: false, runStatus: null, error: "Could not find the ADP application form on this page." });
+          return;
+        }
+      }
+    }
+    const skipFirstFill =
+      (dayforceStart && dayforceStart.kind === "submit") ||
+      (adpStart && (adpStart.kind !== "wizard" || adpStart.step === "Review Your Application"));
+    let lastSpecs = skipFirstFill ? [] : await fillCurrentPage(tabId, eng, ctx, true);
+
+    // ADP: "Applying for ..." moves step by step (Personal Information, Resume, one or more Questions pages,
+    // Voluntary Self-ID, Review). Fill each, Next; Review needs no input. On Self-Attest tick "Yes, I agree to sign
+    // electronically." and type the full name; Submit is pressed by auto-apply in live mode, or by the candidate.
+    if (eng && eng.platform === "adp") {
+      for (let step = 0; step < ADP_MAX_STEPS; step++) {
+        const cur = await adpStage(tabId);
+        if (!cur || cur.kind === "submitted") break;
+        if (cur.kind === "attest") {
+          setAutofill({ runStatus: "Signing the attestation…" });
+          const a = await adpAttest(tabId, ctx);
+          ctx.needsUser.push({
+            cid: "adp-submit",
+            label: "Submit",
+            reason: a.ok
+              ? "Every step is filled and the attestation is signed with your name. Review it and click Submit."
+              : 'Every step is filled. Check "Yes, I agree to sign electronically.", type your full name, then click Submit.',
+          });
+          break;
+        }
+        if (cur.kind !== "wizard") break;
+        setAutofill({ runStatus: `${cur.step} done. Next…` });
+        const nav = await adpNext(tabId);
+        debugLog("[autofill] ADP next:", nav);
+        if (!nav.advanced) {
+          const errs = (nav.errors || []).slice(0, 12);
+          for (const e of errs) ctx.needsUser.push({ cid: "adp-block:" + e, label: e.slice(0, 80), reason: "Complete this, then click Next to continue" });
+          if (!errs.length) ctx.needsUser.push({ cid: "adp-next", label: "Next", reason: "The page did not move on. Check the step for anything missing, then click Next." });
+          break;
+        }
+        const now = nav.stage || {};
+        if (now.kind !== "wizard" || now.step === "Review Your Application") continue; // attest at the loop top; Review needs no input
+        const ok = await rediscoverForm(tabId);
+        if (!ok) break;
+        lastSpecs = await fillCurrentPage(tabId, eng, ctx, false);
+      }
+    }
 
     // Dayforce: Candidate Info -> "Questionnaire n of N" (each its own step) -> Submit, in one tab. Fill a step,
     // click Next, fill the next; on the last step tick the Candidate Acknowledgement and hand over: Submit is the

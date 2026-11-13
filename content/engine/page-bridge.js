@@ -82,6 +82,17 @@
     try {
       el.focus({ preventScroll: true });
     } catch {}
+    // A page without focus (a background tab, auto-apply) gets no focus events from focus(), and components that
+    // keep typed text only while focused drop it (ADP's MDFTextbox: getDerivedStateFromProps resets the value
+    // unless state.hasFocus, set in onFocus). Announce the focus ourselves.
+    // (activeElement still moves in an unfocused page, so ask the document, not the element.)
+    const synthFocus = !document.hasFocus() || document.activeElement !== el;
+    if (synthFocus) {
+      try {
+        el.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+        el.dispatchEvent(new FocusEvent("focus", { bubbles: false }));
+      } catch {}
+    }
     if (setter) setter.call(el, v);
     else el.value = v;
     // Page-world tracker (invisible to isolated content scripts).

@@ -78,6 +78,7 @@ const PLATFORM_MATCHERS = [
   ["smartrecruiters", (h) => h.includes("smartrecruiters.com")],
   ["icims", (h) => h.includes("icims.com")],
   ["dayforce", (h) => h.includes("dayforcehcm.com")],
+  ["adp", (h) => h === "workforcenow.adp.com" || h.endsWith(".workforcenow.adp.com")],
   ["taleo", (h) => h.includes("taleo.net")],
   ["bamboohr", (h) => h.includes("bamboohr.com")],
   ["workable", (h) => h.includes("workable.com")],
@@ -305,6 +306,17 @@ export const ENGINES = {
     available: true,
     autoDiscover: true,
     note: "Imports your resume, fills every step and questionnaire, and ticks the acknowledgement.",
+  },
+  // ADP Workforce Now recruitment (workforcenow.adp.com): consent, sign-in details and the emailed code (read from
+  // the connected inbox), then every wizard step through Self-Attest (content/engine/adp.js).
+  adp: {
+    id: "adp",
+    label: "ADP",
+    mode: "select",
+    scripts: "greenhouse",
+    available: true,
+    autoDiscover: true,
+    note: "Signs in with your emailed code, fills every step and signs the attestation.",
   },
   // BambooHR (*.bamboohr.com): Fabric form (#job-application-form) with native
   // text inputs plus fab-SelectToggle dropdowns (options live on the React
