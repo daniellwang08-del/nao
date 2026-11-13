@@ -879,3 +879,297 @@ export async function adpAttest(tabId, ctx) {
   const r = await tabSend(tabId, { type: "AF_ADP_ATTEST", fullName }, 0);
   return r || { ok: false };
 }
+
+// ── Oracle Recruiting Cloud (*.oraclecloud.com/hcmUI/CandidateExperience) ─────
+// Apply Now, the email gate ("You don't need to have an account": email, terms, Next), "Confirm Your Identity" with
+// the code from the connected inbox (a returning, already-verified browser skips it), then the sections, each filled
+// by the run: the resume is imported first, every field is rewritten from the profile (Oracle's parse is unreliable),
+// education / experience entries are edited and added to match the resume, and the e-signature gets the full name.
+
+export async function oracleStage(tabId) {
+  if (tabId == null) return null;
+  const r = await tabSend(tabId, { type: "AF_ORC_STAGE" }, 0);
+  return r && r.ok ? r.stage : null;
+}
+
+const ORACLE_CODE_WAIT_MS = 150_000;
+
+export async function prepareOracle(tabId, eng, ctx) {
+  let st = await oracleStage(tabId);
+  if (!st && eng) {
+    await reinjectEngine(tabId, eng);
+    st = await oracleStage(tabId);
+  }
+  if (!st) return { blocked: "Could not read the Oracle application on this page. Reload it, then start autofill again." };
+  const profile = await icimsProfile(ctx);
+  const email = ((profile && profile.contact && profile.contact.email) || "").trim();
+  const company = (state.job && state.job.company) || "";
+  let sentAt = 0;
+  for (let hop = 0; hop < 10; hop++) {
+    st = (await oracleStage(tabId)) || st;
+    if (st.kind === "flow" || st.kind === "submitted") return { stage: st };
+    if (st.kind === "already-applied") return { blocked: "You already applied for this job (Oracle says so on the page)." };
+    if (st.kind === "gone") return { blocked: "This job posting is no longer available (expired, filled or removed)." };
+    if (st.kind === "email-link") {
+      return { blocked: "Oracle emailed a link to confirm your identity. Open it from your inbox, then start autofill again on the application." };
+    }
+    if (st.kind === "posting") {
+      setAutofill({ runStatus: "Opening the application…" });
+      await tabSend(tabId, { type: "AF_ORC_APPLY" }, 0);
+    } else if (st.kind === "email") {
+      if (!email) return { blocked: "Add your email to your NAO profile, then start autofill again." };
+      setAutofill({ runStatus: "Entering your email and accepting the terms…" });
+      sentAt = Date.now();
+      const r = await tabSend(tabId, { type: "AF_ORC_EMAIL", email }, 0);
+      debugLog("[autofill] Oracle email gate:", r);
+      if (!r || !r.ok) {
+        const errs = (r && r.stage && r.stage.errors) || [];
+        return { blocked: (r && r.error) || errs[0] || 'Enter your email, tick "I agree with the terms and conditions" and click Next, then start autofill again.' };
+      }
+    } else if (st.kind === "pin") {
+      const res = await enterOracleCode(tabId, company, sentAt || Date.now() - 120_000);
+      if (res.blocked) return res;
+    } else {
+      await delay(1500);
+    }
+  }
+  st = await oracleStage(tabId);
+  if (st && (st.kind === "flow" || st.kind === "submitted")) return { stage: st };
+  return { blocked: "Oracle did not open the application form. Finish the step on the page, then start autofill again." };
+}
+
+// "Confirm Your Identity": the code Oracle emailed, from the connected inbox; the candidate types it otherwise.
+async function enterOracleCode(tabId, company, sentAtMs) {
+  const since = Math.floor(sentAtMs / 1000) - 5;
+  const tried = [];
+  const started = Date.now();
+  setAutofill({ runStatus: "Waiting for the verification code in your email…" });
+  while (Date.now() - started < ORACLE_CODE_WAIT_MS) {
+    let res = null;
+    try {
+      res = await api.getVerificationCode({ since, company: company || undefined, exclude: tried });
+    } catch {
+      res = null;
+    }
+    if (res && res.connected === false) break;
+    if (res && res.code) {
+      tried.push(res.code);
+      setAutofill({ runStatus: `Entering the code from ${res.from || "your email"}…` });
+      const r = await tabSend(tabId, { type: "AF_ORC_PIN", code: res.code }, 0);
+      debugLog("[autofill] Oracle code:", r);
+      if (r && r.ok) return { ok: true };
+      setAutofill({ runStatus: "That code was not accepted, waiting for a newer one…" });
+    }
+    const st = await oracleStage(tabId);
+    if (st && st.kind !== "pin") return { ok: true }; // the candidate entered it
+    await delay(4000);
+  }
+  setAutofill({ runStatus: "Enter the verification code from your email on the page. Autofill continues after Verify." });
+  const end = Date.now() + 180_000;
+  while (Date.now() < end) {
+    const st = await oracleStage(tabId);
+    if (st && st.kind !== "pin") return { ok: true };
+    await delay(2000);
+  }
+  return { blocked: "Enter the verification code Oracle emailed you and click Verify, then start autofill again. Connect your inbox in NAO to have this done for you." };
+}
+
+// The resume goes in first: Oracle parses it into the blocks below, which the run then corrects.
+export async function importOracleResume(tabId, st, ctx) {
+  if (!st || !st.importAvailable || st.imported || ctx.oracleImportTried) return { skipped: true };
+  ctx.oracleImportTried = true;
+  if (!state.job || !state.job.job_id) return { skipped: true };
+  setAutofill({ runStatus: "Importing your resume into Oracle…" });
+  const file = await fetchRoleFile(state.job.job_id, "resume", ".pdf,.doc,.docx", {});
+  if (!file) {
+    ctx.needsUser.push({ cid: "oracle-resume", label: "Resume", reason: "No resume is ready for this job. Upload your resume under Import your profile on the page." });
+    return { ok: false };
+  }
+  const r = await tabSend(tabId, { type: "AF_ORC_IMPORT", file: { name: file.filename, type: file.mime, b64: file.base64 }, timeoutMs: 90000 }, 0);
+  debugLog("[autofill] Oracle resume import:", r);
+  if (!r || !r.ok) {
+    ctx.needsUser.push({ cid: "oracle-resume", label: "Resume import", reason: (r && r.error) || "The resume import did not finish. Your details are still filled from your profile." });
+  }
+  return r || { ok: false };
+}
+
+// Phone (dialing code + national number) for Oracle: a stored "+1 253-220-9979" or "2532209979" with code 1 both
+// become { countryCode: "1", national: "2532209979" }.
+export function oraclePhone(phone, countryCode) {
+  let national = String(phone || "").replace(/\D/g, "");
+  let cc = String(countryCode || "").replace(/\D/g, "");
+  if (!cc) cc = "1";
+  if (national.length > 10 && national.startsWith(cc)) national = national.slice(cc.length);
+  return { countryCode: cc, national };
+}
+
+// Phone and address, written from the profile before the generic fill reads the page (the parsed values are often
+// wrong, e.g. a phone split into "(532) 209-9792" and "1 20-9979" in Address Line 1).
+export async function prepareOracleContact(tabId, ctx) {
+  const profile = await icimsProfile(ctx);
+  if (!profile) return;
+  const contact = profile.contact || {};
+  const addr = profile.address || {};
+  const country = (addr.country || "").trim() || "United States";
+  const phone = oraclePhone(contact.phone, contact.phoneCountryCode);
+  if (phone.national) {
+    setAutofill({ runStatus: "Writing your phone number…" });
+    const r = await tabSend(tabId, { type: "AF_ORC_PHONE", phone: { ...phone, country } }, 0);
+    debugLog("[autofill] Oracle phone:", r);
+  }
+  if (addr.line1 || addr.city || addr.postalCode) {
+    setAutofill({ runStatus: "Writing your address…" });
+    const r = await tabSend(tabId, {
+      type: "AF_ORC_ADDRESS",
+      address: { country, line1: addr.line1 || "", line2: addr.line2 || "", city: addr.city || "", state: addr.state || "", postalCode: addr.postalCode || "" },
+    }, 0);
+    debugLog("[autofill] Oracle address:", r);
+  }
+}
+
+const STOP_WORDS = new Set(["of", "the", "and", "at", "in", "inc", "llc", "ltd", "corp", "unnamed", "major", "job", "title"]);
+const words = (s) =>
+  String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]+/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 1 && !STOP_WORDS.has(w));
+
+function overlap(a, b) {
+  const A = new Set(words(a));
+  const B = new Set(words(b));
+  if (!A.size || !B.size) return 0;
+  let n = 0;
+  for (const w of A) if (B.has(w)) n++;
+  return n / Math.min(A.size, B.size);
+}
+
+// How well a parsed tile matches a resume entry (0 = unrelated).
+export function oracleTileScore(kind, tile, entry) {
+  const text = `${tile.title || ""} ${tile.subtitle || ""}`;
+  const year = String(entry.startMMYYYY || entry.endMMYYYY || "").slice(-4);
+  const yearHit = year && text.includes(year) ? 0.3 : 0;
+  if (kind === "experience") return 2 * overlap(text, entry.company) + 1.5 * overlap(tile.title, entry.title) + yearHit;
+  return 2 * overlap(text, entry.school) + overlap(tile.title, `${entry.fieldOfStudy || ""} ${entry.degree || ""}`) + yearHit;
+}
+
+// Pair the not-yet-handled tiles with the not-yet-written entries (best pairs first). Tiles nothing matched take the
+// remaining entries (a garbled parse is still an entry slot); tiles left over are removed; entries left over are added.
+export function oraclePlanTiles(kind, tiles, entries) {
+  const pairs = [];
+  tiles.forEach((t, ti) => entries.forEach((e, ei) => pairs.push({ ti, ei, s: oracleTileScore(kind, t, e) })));
+  pairs.sort((a, b) => b.s - a.s || a.ti - b.ti || a.ei - b.ei);
+  const tileTo = new Map();
+  const used = new Set();
+  for (const p of pairs) {
+    if (p.s <= 0 || tileTo.has(p.ti) || used.has(p.ei)) continue;
+    tileTo.set(p.ti, p.ei);
+    used.add(p.ei);
+  }
+  const freeEntries = entries.map((_, i) => i).filter((i) => !used.has(i));
+  const edits = [];
+  const deletes = [];
+  tiles.forEach((_, ti) => {
+    if (tileTo.has(ti)) edits.push({ tile: ti, entry: tileTo.get(ti) });
+    else if (freeEntries.length) edits.push({ tile: ti, entry: freeEntries.shift() });
+    else deletes.push(ti);
+  });
+  return { edits, deletes, adds: freeEntries };
+}
+
+const ORACLE_ITEM_KINDS = { education: "education", experience: "workExperience" };
+
+// Education and Experience: edit every entry Oracle parsed so it says exactly what the resume says, remove entries the
+// resume does not have, and add the ones the parse skipped (it often keeps only the two latest jobs).
+export async function oracleProfileItems(tabId, ctx) {
+  const profile = await icimsProfile(ctx);
+  if (!profile) return;
+  const country = ((profile.address && profile.address.country) || "").trim() || "United States";
+  const fallbackCity = (profile.address && profile.address.city) || "";
+  const fallbackState = (profile.address && profile.address.state) || "";
+  const list = async () => {
+    const r = await tabSend(tabId, { type: "AF_ORC_ITEMS" }, 0);
+    return (r && r.ok && r.blocks) || [];
+  };
+  let blocks = await list();
+  for (let b = 0; b < blocks.length; b++) {
+    const kind = blocks[b].kind;
+    const key = ORACLE_ITEM_KINDS[kind];
+    if (!key) continue;
+    const all = (Array.isArray(profile[key]) ? profile[key] : []).filter((e) => e && (kind === "education" ? e.school : e.company || e.title));
+    if (!all.length) continue;
+    const label = kind === "education" ? "Education" : "Experience";
+    if (blocks[b].editing) await tabSend(tabId, { type: "AF_ORC_ITEM_CANCEL", block: b }, 0);
+    const written = new Set();
+    const report = (entry, why) => {
+      const name = kind === "education" ? entry.school : `${entry.title || ""} at ${entry.company || ""}`;
+      ctx.needsUser.push({ cid: `oracle-${kind}:${name}`, label: `${label}: ${name}`.slice(0, 90), reason: why });
+    };
+    const writeOpen = async (entry) => {
+      const fill = await tabSend(tabId, { type: "AF_ORC_ITEM_FILL", block: b, kind, entry, opts: { country, fallbackCity, fallbackState } }, 0);
+      debugLog(`[autofill] Oracle ${kind} fill:`, fill);
+      const saved = await tabSend(tabId, { type: "AF_ORC_ITEM_SAVE", block: b }, 0);
+      debugLog(`[autofill] Oracle ${kind} save:`, saved);
+      if (saved && saved.ok) return true;
+      await tabSend(tabId, { type: "AF_ORC_ITEM_CANCEL", block: b }, 0);
+      report(entry, `Oracle would not save this entry: ${((saved && saved.errors) || []).slice(0, 3).join("; ") || "check its fields"}. Fix it on the page.`);
+      return false;
+    };
+    // Edits and removals, one tile at a time (positions move after each save or removal).
+    for (let guard = 0; guard < 30; guard++) {
+      blocks = await list();
+      const blk = blocks[b];
+      if (!blk || blk.kind !== kind) break;
+      const pending = blk.tiles.map((t, i) => ({ ...t, i })).filter((t) => !t.done && !t.readOnly);
+      if (!pending.length) break;
+      const remaining = all.map((e, i) => ({ e, i })).filter((x) => !written.has(x.i));
+      const plan = oraclePlanTiles(kind, pending, remaining.map((x) => x.e));
+      if (plan.edits.length) {
+        const step = plan.edits[0];
+        const tile = pending[step.tile];
+        const target = remaining[step.entry];
+        setAutofill({ runStatus: `Correcting ${label.toLowerCase()}: ${(kind === "education" ? target.e.school : target.e.company) || tile.title}…` });
+        written.add(target.i);
+        const open = await tabSend(tabId, { type: "AF_ORC_ITEM_OPEN", block: b, tile: tile.i }, 0);
+        if (!open || !open.ok) {
+          report(target.e, (open && open.error) || "This entry could not be opened.");
+          continue;
+        }
+        await writeOpen(target.e);
+      } else if (plan.deletes.length) {
+        const tile = pending[plan.deletes[0]];
+        setAutofill({ runStatus: `Removing a ${label.toLowerCase()} entry your resume does not have…` });
+        const del = await tabSend(tabId, { type: "AF_ORC_ITEM_DELETE", block: b, tile: tile.i }, 0);
+        debugLog(`[autofill] Oracle ${kind} delete:`, tile.title, del);
+        if (!del || !del.ok) break;
+      } else break;
+    }
+    // Entries the parse skipped.
+    for (let i = 0; i < all.length; i++) {
+      if (written.has(i)) continue;
+      const entry = all[i];
+      written.add(i);
+      setAutofill({ runStatus: `Adding ${label.toLowerCase()}: ${(kind === "education" ? entry.school : entry.company) || ""}…` });
+      const add = await tabSend(tabId, { type: "AF_ORC_ITEM_ADD", block: b }, 0);
+      if (!add || !add.ok) {
+        report(entry, (add && add.error) || "Oracle did not open a new entry. Add it on the page.");
+        continue;
+      }
+      await writeOpen(entry);
+    }
+    blocks = await list();
+  }
+}
+
+export async function oracleSign(tabId, ctx) {
+  const profile = await icimsProfile(ctx);
+  const name = (profile && profile.name) || {};
+  const fullName = [name.first, name.middle, name.last].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+  const r = await tabSend(tabId, { type: "AF_ORC_SIGN", fullName }, 0);
+  return r || { ok: false };
+}
+
+export async function oracleNext(tabId) {
+  const r = await tabSend(tabId, { type: "AF_ORC_NEXT", timeoutMs: 25000 }, 0);
+  return r && r.ok ? r : { advanced: false, errors: [] };
+}

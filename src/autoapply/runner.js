@@ -376,9 +376,10 @@ async function run(cfg) {
   if (onBoard(tab.url)) tab = await leaveBoard(tab, job);
 
   // Description pages hide the form behind "Apply"; fill only once it shows.
-  // JobDiva opens its own Quick Apply during the fill.
+  // JobDiva opens its own Quick Apply during the fill, and Oracle walks Apply Now, its email gate and the emailed
+  // code itself (the generic probe stops at the email gate).
   platform = detectPlatform({ pageUrl: tab.url });
-  if (platform !== "jobdiva" && !NEEDS_ACCOUNT.has(platform)) {
+  if (platform !== "jobdiva" && platform !== "oracle" && !NEEDS_ACCOUNT.has(platform)) {
     const reached = await reachApplicationForm(tab.id, {
       onStep: step,
       waitMs: 25_000,

@@ -30,7 +30,7 @@ import {
   successStats,
   timeAgo,
 } from "./model.js";
-import { DEFAULT_SUBMIT_PLATFORMS, EASE_TIER, NEEDS_ACCOUNT, PLATFORM_LABEL, rankJobs } from "./platforms.js";
+import { DEFAULT_SUBMIT_PLATFORMS, EASE_TIER, NEEDS_ACCOUNT, PLATFORM_LABEL, SPLIT_FROM_GENERIC, rankJobs } from "./platforms.js";
 
 const SETTINGS_KEY = "aaSettings";
 const HISTORY_KEY = "aaHistory";
@@ -44,8 +44,8 @@ const ALL_PLATFORMS = [...FILL_PLATFORMS, ...NEEDS_ACCOUNT, "board"].sort((a, b)
 // iCIMS makes an account per employer before every form, so it stays opt-in.
 const RECOMMENDED_FILL = ALL_PLATFORMS.filter((p) => p !== "icims");
 // The site default before every site but iCIMS was on.
-const OLD_DEFAULT_FILL = FILL_PLATFORMS.filter((p) => p !== "generic");
-const SETTINGS_VERSION = 3;
+const OLD_DEFAULT_FILL = FILL_PLATFORMS.filter((p) => p !== "generic" && !SPLIT_FROM_GENERIC.includes(p));
+const SETTINGS_VERSION = 4;
 
 const DEFAULT_SETTINGS = {
   version: SETTINGS_VERSION,
@@ -153,6 +153,11 @@ function loadedSettings(saved) {
   if ((kept.version || 1) < 2 && untouched) settings.platforms = RECOMMENDED_FILL;
   // Version 3 made interview chance the default order; move the old default with it.
   if ((kept.version || 1) < 3 && (kept.order || "ease") === "ease") settings.order = "callback";
+  // Version 4: Dayforce, ADP and Oracle got their own engines; their jobs used to count as Career sites, so whoever
+  // had Career sites on keeps applying to them.
+  if ((kept.version || 1) < 4 && Array.isArray(settings.platforms) && settings.platforms.includes("generic")) {
+    settings.platforms = [...new Set([...settings.platforms, ...SPLIT_FROM_GENERIC])];
+  }
   return settings;
 }
 

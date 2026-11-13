@@ -475,6 +475,11 @@
         const root = AF.adp.applicationRoot();
         if (root) return root;
       }
+      // Oracle Recruiting: the open section (or the whole single-page application).
+      if (AF.oracle && AF.oracle.isOraclePage() && AF.oracle.applicationRoot) {
+        const root = AF.oracle.applicationRoot();
+        if (root) return root;
+      }
     } catch {}
     ensureAshbyFormVisible();
     ensureLeverApplyVisible();
@@ -2912,6 +2917,68 @@
             return df.acknowledge();
           default:
             return { ok: false, error: "unknown Dayforce action" };
+        }
+      };
+      run()
+        .then((res) => {
+          try {
+            sendResponse(res);
+          } catch {}
+        })
+        .catch((e) => {
+          try {
+            sendResponse({ ok: false, error: String((e && e.message) || e) });
+          } catch {}
+        });
+      return true;
+    }
+    // Oracle Recruiting (Candidate Experience): Apply, the email gate, the emailed code, the resume import, the
+    // education / experience entries, phone, address, e-signature and the section Next.
+    if (typeof msg.type === "string" && msg.type.startsWith("AF_ORC_")) {
+      const orc = AF.oracle;
+      if (!orc || !orc.isOraclePage()) return false;
+      const run = async () => {
+        switch (msg.type) {
+          case "AF_ORC_STAGE":
+            return { ok: true, stage: orc.stage() };
+          case "AF_ORC_APPLY":
+            return orc.apply();
+          case "AF_ORC_EMAIL":
+            return orc.emailGate(msg.email || "");
+          case "AF_ORC_PIN":
+            return orc.enterPin(msg.code || "");
+          case "AF_ORC_IMPORT":
+            return orc.importResume(msg.file || {}, { timeoutMs: msg.timeoutMs || 90000 });
+          case "AF_ORC_ITEMS":
+            return { ok: true, blocks: orc.listProfileItems() };
+          case "AF_ORC_ITEM_OPEN":
+            return orc.openTile(msg.block, msg.tile);
+          case "AF_ORC_ITEM_ADD":
+            return orc.addTile(msg.block);
+          case "AF_ORC_ITEM_DELETE":
+            return orc.deleteTile(msg.block, msg.tile);
+          case "AF_ORC_ITEM_FILL":
+            return orc.fillEntry(msg.block, msg.kind, msg.entry || {}, msg.opts || {});
+          case "AF_ORC_ITEM_SAVE":
+            return orc.saveTile(msg.block);
+          case "AF_ORC_ITEM_CANCEL":
+            return orc.cancelTile(msg.block);
+          case "AF_ORC_PHONE": {
+            const r = await orc.setPhone(msg.phone || {});
+            if (r.ok) orc.markOwned("phone");
+            return r;
+          }
+          case "AF_ORC_ADDRESS": {
+            const r = await orc.setAddress(msg.address || {});
+            if (r.ok) orc.markOwned("address");
+            return r;
+          }
+          case "AF_ORC_SIGN":
+            return orc.sign(msg.fullName || "");
+          case "AF_ORC_NEXT":
+            return { ok: true, ...(await orc.next({ timeoutMs: msg.timeoutMs || 25000 })) };
+          default:
+            return { ok: false, error: "unknown Oracle action" };
         }
       };
       run()

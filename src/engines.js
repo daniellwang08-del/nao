@@ -79,6 +79,9 @@ const PLATFORM_MATCHERS = [
   ["icims", (h) => h.includes("icims.com")],
   ["dayforce", (h) => h.includes("dayforcehcm.com")],
   ["adp", (h) => h === "workforcenow.adp.com" || h.endsWith(".workforcenow.adp.com")],
+  // Oracle Recruiting Cloud Candidate Experience: <pod>.fa.<dc>.oraclecloud.com, or a vanity host serving the same
+  // /hcmUI/CandidateExperience/ app.
+  ["oracle", (h, p) => /\/hcmUI\/CandidateExperience\//i.test(p || "")],
   ["taleo", (h) => h.includes("taleo.net")],
   ["bamboohr", (h) => h.includes("bamboohr.com")],
   ["workable", (h) => h.includes("workable.com")],
@@ -317,6 +320,20 @@ export const ENGINES = {
     available: true,
     autoDiscover: true,
     note: "Signs in with your emailed code, fills every step and signs the attestation.",
+  },
+  // Oracle Recruiting Cloud (*.oraclecloud.com/hcmUI/CandidateExperience): Apply Now, the email gate (email + terms,
+  // never the honeypot), the emailed identity code (read from the connected inbox), then every section: the resume
+  // imported first, every field rewritten (Oracle's parse is unreliable), education / experience entries edited and
+  // added to match the resume, cover letter, questions and diversity, the e-signature. Submit is the candidate's
+  // (content/engine/oracle.js, drivers/oracle-select.js).
+  oracle: {
+    id: "oracle",
+    label: "Oracle Recruiting",
+    mode: "select",
+    scripts: "greenhouse",
+    available: true,
+    autoDiscover: true,
+    note: "Verifies your email with the emailed code, imports your resume, fixes every field and entry, and fills each step.",
   },
   // BambooHR (*.bamboohr.com): Fabric form (#job-application-form) with native
   // text inputs plus fab-SelectToggle dropdowns (options live on the React

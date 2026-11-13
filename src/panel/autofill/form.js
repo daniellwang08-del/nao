@@ -38,6 +38,13 @@ import {
   adpNext,
   adpStage,
   prepareAdp,
+  importOracleResume,
+  oracleNext,
+  oracleProfileItems,
+  oracleSign,
+  oracleStage,
+  prepareOracle,
+  prepareOracleContact,
 } from "./platforms.js";
 import {
   autofillFrameId,
@@ -151,8 +158,9 @@ export async function startAutofill({ tab: targetTab = null, headless = false, r
     }
     if (!headless && !reached) void checkAppliedAlongside();
     // A description page: open the application first (JobDiva does its own).
-    // ADP walks its own gates (consent, sign-in details, emailed code) in the run (prepareAdp).
-    if (engine.mode !== "workday" && engine.platform !== "jobdiva" && engine.platform !== "adp" && !reached) {
+    // ADP walks its own gates (consent, sign-in details, emailed code) in the run (prepareAdp), and Oracle its own
+    // (Apply Now, the email gate, the emailed code) in prepareOracle.
+    if (engine.mode !== "workday" && engine.platform !== "jobdiva" && engine.platform !== "adp" && engine.platform !== "oracle" && !reached) {
       if (!headless) toast("Opening the application form…");
       const hop = await reachApplicationForm(tab.id, { waitMs: headless ? 25_000 : 15_000, focus: focusGate() });
       if (!hop.tab) return fail("The application tab was closed.");
@@ -195,6 +203,17 @@ export async function startAutofill({ tab: targetTab = null, headless = false, r
     if (engine.platform === "icims") {
       setState({ autofill: { ...emptyAutofill(), active: true, discovering: true, tabId: tab.id, engine } });
       const gate = await passIcimsEmailGate(tab.id, engine, {});
+      if (gate.blocked) {
+        setAutofill({ discovering: false, runStatus: null, error: gate.blocked });
+        return { ok: false, error: gate.blocked };
+      }
+      setAutofill({ runStatus: null });
+    }
+    // Oracle: the application form exists only after Apply Now, the email gate and the emailed code. Walk them first
+    // (the run calls prepareOracle again, which then finds the form open), so discovery sees the first section.
+    if (engine.platform === "oracle") {
+      setState({ autofill: { ...emptyAutofill(), active: true, discovering: true, tabId: tab.id, engine } });
+      const gate = await prepareOracle(tab.id, engine, { needsUser: [] });
       if (gate.blocked) {
         setAutofill({ discovering: false, runStatus: null, error: gate.blocked });
         return { ok: false, error: gate.blocked };
@@ -771,19 +790,20 @@ const JV_MAX_PAGES = 6; // Jobvite multi-step applications: hard cap on steps
 const ICIMS_MAX_PAGES = 10; // iCIMS itineraries are typically 3-5 steps; cap well above
 const DAYFORCE_MAX_STEPS = 12; // Candidate Info + up to ~8 questionnaires + Submit
 const ADP_MAX_STEPS = 14; // Personal Information, Resume, Questions (1..n), Voluntary Self-ID, Review, Self-Attest
+const ORACLE_MAX_SECTIONS = 12; // Personal Info, Questions, Experience, More About You, Review (and custom ones)
 
 // Re-run auto-discovery on the current page and wait for the application
 // container to register. Used between SmartRecruiters steps: after clicking
 // "Next", the previous step's controls detach, so we re-select the (persistent
 // or freshly mounted) form container to get live handles for the next step.
-async function rediscoverForm(tabId) {
+async function rediscoverForm(tabId, maxMs = 16000) {
   setAutofill({ fields: [] });
   // Re-trigger discovery REPEATEDLY: the next step's <oc-oneclick-form> remounts
   // asynchronously and, on a slow network, often lands AFTER a single
   // AF_AUTOSELECT's internal retry window (~2.4s) expires. Re-sending every couple
   // seconds (for up to ~16s) guarantees a discovery pass fires once the step's
   // form is actually in the DOM, instead of giving up and ending the run.
-  const deadline = Date.now() + 16000;
+  const deadline = Date.now() + maxMs;
   let lastSend = 0;
   while (Date.now() < deadline) {
     if (Date.now() - lastSend > 2200) {
@@ -912,12 +932,17 @@ async function fillCurrentPage(tabId, eng, ctx, isFirstPage) {
 
     // Only fill controls that are not already filled on the page and that we
     // have not already attempted in a prior pass (keyed by stable identity).
+    // Oracle: its resume parse pre-fills wrong values (a phone split across Phone and Address Line 1), so every
+    // control is answered on the first pass, filled or not. Files stay as they are (the resume is already in).
+    const overwrite = !!(ctx && ctx.overwriteFilled) && pass === 0;
     const fresh = specs
       .map((f) => ({
         handle: f.handle,
         label: f.label,
         html: f.html || "",
-        controls: (f.controls || []).filter((c) => !c.filled && !attemptedKeys.has(c.key)),
+        controls: (f.controls || []).filter(
+          (c) => (!c.filled || (overwrite && String(c.kind || "") !== "file")) && !attemptedKeys.has(c.key)
+        ),
       }))
       .filter((f) => f.controls.length);
     if (!fresh.length) break;
@@ -1459,10 +1484,61 @@ async function runAutofillPass() {
         }
       }
     }
+    // Oracle: Apply Now, the email gate and the emailed code first; its sections are filled in their own loop below.
+    let oracleStart = null;
+    if (eng && eng.platform === "oracle") {
+      const prep = await prepareOracle(tabId, eng, ctx);
+      if (prep.blocked) {
+        setAutofill({ running: false, runStatus: null, error: prep.blocked });
+        return;
+      }
+      oracleStart = prep.stage || { kind: "flow" };
+      ctx.overwriteFilled = true;
+    }
     const skipFirstFill =
+      !!oracleStart ||
       (dayforceStart && dayforceStart.kind === "submit") ||
       (adpStart && (adpStart.kind !== "wizard" || adpStart.step === "Review Your Application"));
     let lastSpecs = skipFirstFill ? [] : await fillCurrentPage(tabId, eng, ctx, true);
+
+    // Oracle: section by section (Personal Info, Application Questions, Experience, More About You, ...). On each: the
+    // resume import first (Oracle fills the blocks from it), phone and address from the profile, every other field
+    // answered again (Oracle's parse is unreliable), education / experience entries corrected and completed, the
+    // e-signature, then Next. The last section's Submit is the candidate's.
+    if (oracleStart && oracleStart.kind === "flow") {
+      for (let s = 0; s < ORACLE_MAX_SECTIONS; s++) {
+        let cur = await oracleStage(tabId);
+        if (!cur || cur.kind !== "flow") break;
+        const name = cur.title || (cur.sections ? `Step ${cur.section} of ${cur.sections}` : "The application");
+        if (cur.importAvailable && !cur.imported) {
+          await importOracleResume(tabId, cur, ctx);
+          cur = (await oracleStage(tabId)) || cur;
+        }
+        await prepareOracleContact(tabId, ctx);
+        setAutofill({ runStatus: `${name}: reading the fields…` });
+        if (await rediscoverForm(tabId, 6000)) lastSpecs = await fillCurrentPage(tabId, eng, ctx, false);
+        if (cur.profileBlocks) await oracleProfileItems(tabId, ctx);
+        await oracleSign(tabId, ctx);
+        const after = (await oracleStage(tabId)) || cur;
+        if (!after.hasNext) {
+          ctx.needsUser.push({
+            cid: "oracle-submit",
+            label: "Submit",
+            reason: "Every section is filled and your entries match your resume. Review the application and click Submit.",
+          });
+          break;
+        }
+        setAutofill({ runStatus: `${name} done. Next…` });
+        const nav = await oracleNext(tabId);
+        debugLog("[autofill] Oracle next:", nav);
+        if (!nav.advanced) {
+          const errs = (nav.errors || []).slice(0, 12);
+          for (const e of errs) ctx.needsUser.push({ cid: "oracle-block:" + e, label: e.slice(0, 80), reason: "Complete this, then click Next to continue" });
+          if (!errs.length) ctx.needsUser.push({ cid: "oracle-next", label: "Next", reason: "The page did not move on. Check this step for anything missing, then click Next." });
+          break;
+        }
+      }
+    }
 
     // ADP: "Applying for ..." moves step by step (Personal Information, Resume, one or more Questions pages,
     // Voluntary Self-ID, Review). Fill each, Next; Review needs no input. On Self-Attest tick "Yes, I agree to sign

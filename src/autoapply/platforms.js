@@ -17,8 +17,15 @@ export const EASE_TIER = {
   breezy: 3,
   jobvite: 3,
   bamboohr: 3,
+  // Multi-step portals with their own engines (emailed codes, resume import, entry editing).
+  dayforce: 3,
+  adp: 3,
+  oracle: 3,
   generic: 4,
 };
+
+// Sites that counted as "Career sites" (generic) before they got their own engine.
+export const SPLIT_FROM_GENERIC = ["dayforce", "adp", "oracle"];
 
 // These need an account (sign-up, password, email link) before the form.
 export const NEEDS_ACCOUNT = new Set(["workday", "icims", "taleo"]);
@@ -37,6 +44,9 @@ export const PLATFORM_LABEL = {
   breezy: "Breezy",
   jobvite: "Jobvite",
   bamboohr: "BambooHR",
+  dayforce: "Dayforce",
+  adp: "ADP",
+  oracle: "Oracle Recruiting",
   generic: "Career sites",
   workday: "Workday",
   icims: "iCIMS",

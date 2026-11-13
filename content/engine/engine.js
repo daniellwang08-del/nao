@@ -11,7 +11,7 @@
   const { clean, labelText, cidFor, diag } = AF.dom;
 
   const ANCHOR_SEL =
-    'input, textarea, select, [contenteditable=""], [contenteditable="true"], [role="combobox"], .iti, .yes-no-inputs, [class*="_yesno_"], spl-radio-group, button.fab-SelectToggle';
+    'input, textarea, select, [contenteditable=""], [contenteditable="true"], [role="combobox"], .iti, .yes-no-inputs, [class*="_yesno_"], spl-radio-group, button.fab-SelectToggle, ul.cx-select-pills-container';
 
   // cid -> { driver, root, spec, handle }
   const controls = new Map();
@@ -55,6 +55,8 @@
   function hasVisibleCustomUi(el) {
     if (!el) return false;
     try {
+      // Oracle Recruiting: 0x0 hidden-control checkboxes/radios behind a styled label.
+      if (AF.oracle && AF.oracle.hasVisibleProxy && AF.oracle.hasVisibleProxy(el)) return true;
       if (el.tagName === "SELECT") {
         const field =
           (el.closest &&
@@ -149,6 +151,7 @@
             if (AF.icims && AF.icims.shouldSkipControl && AF.icims.shouldSkipControl(n)) return;
             if (AF.jobvite && AF.jobvite.shouldSkipControl && AF.jobvite.shouldSkipControl(n)) return;
             if (AF.jobdiva && AF.jobdiva.shouldSkipControl && AF.jobdiva.shouldSkipControl(n)) return;
+            if (AF.oracle && AF.oracle.shouldSkipControl && AF.oracle.shouldSkipControl(n)) return;
             if (n.closest && AF.workable && AF.workable.shouldSkipSubtree && n.closest('[data-ui="education"], [data-ui="experience"], [data-ui="autofill-button"]')) return;
           } catch {}
           anchors.push(n);
@@ -194,6 +197,7 @@
         if (AF.jobdiva && AF.jobdiva.shouldSkipControl && AF.jobdiva.shouldSkipControl(anchor)) continue;
         if (AF.dayforce && AF.dayforce.shouldSkipControl && AF.dayforce.shouldSkipControl(anchor)) continue;
         if (AF.adp && AF.adp.shouldSkipControl && AF.adp.shouldSkipControl(anchor)) continue;
+        if (AF.oracle && AF.oracle.shouldSkipControl && AF.oracle.shouldSkipControl(anchor)) continue;
         if (anchor.closest && AF.workable && anchor.closest('[data-ui="education"], [data-ui="experience"], [data-ui="autofill-button"]')) continue;
       } catch {}
       if (AF.dom.isHoneypot(anchor)) {
