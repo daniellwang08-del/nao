@@ -8,7 +8,7 @@ import { isPastedJobUrl, localTimezone, messageOf, toJobCard } from "../format.j
 import { LISTS, listQuery } from "../lists.js";
 import { live } from "../live.js";
 import { setState, state } from "../state.js";
-import { getWebWorkTab, openInWorkTab } from "../tabs.js";
+import { getWebWorkTab, openInNewTab, openInWorkTab } from "../tabs.js";
 import { toast } from "../toast.js";
 import { goHome } from "./home.js";
 
@@ -74,7 +74,7 @@ export function isPreparing(job, now = Date.now()) {
  * `context` is the list it came from, used by "Applied, next job".
  * `preparing` marks a job whose analysis and documents were just queued.
  */
-export async function openJob(jobId, { navigate = false, context, keepReportNotice = false, preparing = false } = {}) {
+export async function openJob(jobId, { navigate = false, context, keepReportNotice = false, preparing = false, newTab = false } = {}) {
   const id = String(jobId);
   const seq = ++openSeq;
   stopStreaming();
@@ -96,7 +96,9 @@ export async function openJob(jobId, { navigate = false, context, keepReportNoti
       job.analyzing = job.score == null;
     }
     job.engine = resolveEngine({ snapshot: job.snapshot });
-    const tabId = navigate && job.url ? await openInWorkTab(job.url) : null;
+    // newTab: the previous job's tab is being closed (Mark as invalid), so never reuse it or whichever tab Chrome
+    // focuses after it.
+    const tabId = navigate && job.url ? await (newTab ? openInNewTab(job.url) : openInWorkTab(job.url)) : null;
     if (seq !== openSeq) return;
     setState({ job });
     markSeen(id);
@@ -357,12 +359,12 @@ async function resolveNext(afterId) {
   return null;
 }
 
-async function advance(fromJobId, { keepReportNotice = false } = {}) {
+async function advance(fromJobId, { keepReportNotice = false, newTab = false } = {}) {
   const title = (state.applyContext && state.applyContext.title) || "Ready to apply";
   const next = await resolveNext(fromJobId);
   if (next) {
     if (next.ctx) setState({ applyContext: next.ctx });
-    await openJob(next.jobId, { navigate: true, keepReportNotice });
+    await openJob(next.jobId, { navigate: true, keepReportNotice, newTab });
     return;
   }
   const quick = state.applyContext && state.applyContext.listId === "quick";
@@ -547,10 +549,41 @@ async function confirmReport(job) {
   }
   await teardownAutofill();
   setState({ modal: null, reportNotice: { title: job.title, company: job.company } });
+  await leaveInvalidJob(job);
+}
+
+/** An invalid job is done with: the next job opens in a new tab, then every tab showing the invalid one closes. */
+async function leaveInvalidJob(job) {
+  const tabs = await tabsShowingJob(job.job_id);
   try {
-    await advance(job.job_id, { keepReportNotice: true });
+    await advance(job.job_id, { keepReportNotice: true, newTab: true });
   } catch {
     await goHome();
+  }
+  for (const id of tabs) await chrome.tabs.remove(id).catch(() => {});
+  await forgetJobTabs(job.job_id);
+}
+
+/** Tabs bound to `jobId` (the page NAO opened for it). */
+async function tabsShowingJob(jobId) {
+  try {
+    const { applyTabJobs } = await chrome.storage.session.get("applyTabJobs");
+    return Object.entries(applyTabJobs || {})
+      .filter(([, v]) => v && String(v.jobId) === String(jobId))
+      .map(([tabId]) => Number(tabId))
+      .filter((n) => Number.isFinite(n));
+  } catch {
+    return [];
+  }
+}
+
+async function forgetJobTabs(jobId) {
+  try {
+    const { applyTabJobs } = await chrome.storage.session.get("applyTabJobs");
+    const kept = Object.fromEntries(Object.entries(applyTabJobs || {}).filter(([, v]) => !v || String(v.jobId) !== String(jobId)));
+    await chrome.storage.session.set({ applyTabJobs: kept });
+  } catch {
+    /* session storage unavailable */
   }
 }
 
@@ -579,12 +612,8 @@ export async function pageJobAction({ jobId, action }) {
     }
     await teardownAutofill();
     setState({ reportNotice: { title: job.title, company: job.company } });
-    try {
-      await advance(job.job_id, { keepReportNotice: true });
-    } catch {
-      await goHome();
-    }
-    return { ok: true, state: "idle", message: "Reported as invalid." };
+    await leaveInvalidJob(job);
+    return { ok: true, state: "idle", message: "Reported as invalid.", closing: true };
   }
   return { ok: false, error: "Unknown action." };
 }

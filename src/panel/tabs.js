@@ -49,6 +49,13 @@ export async function openInWorkTab(url) {
   return created.id;
 }
 
+/** Load `url` in a new active tab and return its id (null when the URL is not a web page). */
+export async function openInNewTab(url) {
+  if (!isWebUrl(url)) return null;
+  const created = await chrome.tabs.create({ url, active: true });
+  return created.id;
+}
+
 export async function openNewTab(url) {
   if (isWebUrl(url)) await chrome.tabs.create({ url, active: true });
 }

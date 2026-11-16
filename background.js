@@ -794,7 +794,29 @@ async function fabActions(job) {
   return { applied: true, invalid: true, skip: (ownedByAutoApply && consoleOpen) || panelOpen };
 }
 
+// Mark as invalid: the job is reported and its tab closes, whoever handled it (console, side panel or here).
 async function fabAction(tabId, action) {
+  const res = await fabActionRoute(tabId, action);
+  if (action === "invalid" && res && res.ok) await closeInvalidTab(tabId);
+  return res;
+}
+
+async function closeInvalidTab(tabId) {
+  try {
+    const { applyTabJobs } = await chrome.storage.session.get("applyTabJobs");
+    if (applyTabJobs && applyTabJobs[String(tabId)]) {
+      const rest = { ...applyTabJobs };
+      delete rest[String(tabId)];
+      await chrome.storage.session.set({ applyTabJobs: rest });
+    }
+    await chrome.storage.session.remove(AA_HANDOFF_PREFIX + tabId);
+  } catch {
+    /* session storage unavailable */
+  }
+  await chrome.tabs.remove(tabId).catch(() => {});
+}
+
+async function fabActionRoute(tabId, action) {
   const job = await jobForTab(tabId);
   if (!job) return { ok: false, error: "NAO no longer tracks this job on this tab." };
   if (!["applied", "invalid", "skip"].includes(action)) return { ok: false, error: "Unknown action." };
@@ -820,36 +842,10 @@ async function fabAction(tabId, action) {
     }
     await api.reportJobInvalid(job.jobId, "Marked invalid from the application page.");
     api.updateSession(job.jobId, "completed").catch(() => {});
-    // Neither auto-apply nor the side panel is on this job: move this tab on to the next Ready to apply job, as the
-    // panel's Report expired does (before, the page simply stayed on the invalid posting).
-    const next = await openNextJobInTab(tabId, job.jobId);
-    if (next) return { ok: true, state: "idle", message: `Reported as invalid. Opening the next job: ${next}` };
-    return { ok: true, state: "idle", message: "Reported as invalid. That was the last job in Ready to apply." };
+    return { ok: true, state: "idle", message: "Reported as invalid. Closing this tab.", closing: true };
   } catch (err) {
     return { ok: false, error: String((err && err.message) || err) };
   }
-}
-
-// The next Ready to apply job, loaded in `tabId` and bound to it (the corner toolbar follows). Returns its label, or
-// null when there is none.
-async function openNextJobInTab(tabId, afterJobId) {
-  let next = null;
-  try {
-    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    next = await api.nextJob(afterJobId, { view: "ready", timezone: tz });
-  } catch {
-    return null;
-  }
-  if (!next || !next.job_id || !/^https?:/i.test(String(next.url || ""))) return null;
-  // The tab now holds the next job: a hand-off belonged to the reported one.
-  await chrome.storage.session.remove(AA_HANDOFF_PREFIX + tabId).catch(() => {});
-  await rememberJobTab(tabId, next.job_id);
-  try {
-    await chrome.tabs.update(tabId, { url: next.url });
-  } catch {
-    return null;
-  }
-  return [next.title, next.company].filter(Boolean).join(" at ") || "the next job";
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {

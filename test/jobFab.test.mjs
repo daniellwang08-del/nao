@@ -20,7 +20,8 @@ const body = [
   grab("async function repaintJobFab(tabId) {"),
   grab("async function fabActions(job) {"),
   grab("async function fabAction(tabId, action) {"),
-  grab("async function openNextJobInTab(tabId, afterJobId) {"),
+  grab("async function closeInvalidTab(tabId) {"),
+  grab("async function fabActionRoute(tabId, action) {"),
 ].join("\n");
 
 function area(initial = {}) {
@@ -42,8 +43,8 @@ function area(initial = {}) {
   };
 }
 
-function load({ session = {}, local = {}, panelOpens = true, consoleOpen = false, panelOpen = false, replies = {}, next = null } = {}) {
-  const calls = { order: [], messages: [], created: [], painted: [], api: [], navigated: [] };
+function load({ session = {}, local = {}, panelOpens = true, consoleOpen = false, panelOpen = false, replies = {}, next = null, reportFails = false } = {}) {
+  const calls = { order: [], messages: [], created: [], painted: [], api: [], navigated: [], closed: [] };
   const chrome = {
     storage: { session: area(session), local: area(local) },
     sidePanel: {
@@ -58,11 +59,16 @@ function load({ session = {}, local = {}, panelOpens = true, consoleOpen = false
       create: async (t) => { calls.created.push(t.url); return { id: 99 }; },
       sendMessage: async (tabId, m) => { calls.painted.push([tabId, m]); },
       update: async (tabId, props) => { calls.navigated.push([tabId, props.url]); return { id: tabId }; },
+      remove: async (tabId) => { calls.closed.push(tabId); },
     },
   };
   const api = {
     markApplied: async (ids) => { calls.api.push(["markApplied", ids]); return { marked: ids.length }; },
-    reportJobInvalid: async (id, reason) => { calls.api.push(["reportJobInvalid", id, reason]); return {}; },
+    reportJobInvalid: async (id, reason) => {
+      calls.api.push(["reportJobInvalid", id, reason]);
+      if (reportFails) throw new Error("Request failed (500).");
+      return {};
+    },
     updateSession: async () => ({}),
     nextJob: async (after, opts) => { calls.api.push(["nextJob", after, opts.view]); return next || { remaining: 0 }; },
   };
@@ -177,26 +183,37 @@ test("with neither the console nor the panel open, Applied and Invalid are recor
   assert.equal((await fabAction(3, "applied")).ok, true);
   assert.equal((await fabAction(3, "invalid")).ok, true);
   assert.equal((await fabAction(3, "skip")).ok, false);
-  assert.deepEqual(calls.api.map((c) => c[0]), ["markApplied", "reportJobInvalid", "nextJob"]);
+  assert.deepEqual(calls.api.map((c) => c[0]), ["markApplied", "reportJobInvalid"]);
   assert.equal((await fabAction(9, "applied")).ok, false); // not a NAO tab
 });
 
-test("Invalid on a page NAO opened moves the tab on to the next Ready to apply job, and the toolbar follows it", async () => {
-  const next = { job_id: "j4", url: "https://boards.example.com/jobs/4/apply", title: "Data Engineer", company: "Acme", remaining: 12 };
-  const { fabAction, jobForTab, calls } = load({ session: { applyTabJobs: { 3: { jobId: "j3", at: now } }, "aaHandoff:3": { jobId: "j3" } }, next });
+test("Mark as invalid reports the job and closes its tab (no side panel, no console)", async () => {
+  const { fabAction, jobForTab, calls, chrome } = load({ session: { applyTabJobs: { 3: { jobId: "j3", at: now }, 5: { jobId: "j5", at: now } }, "aaHandoff:3": { jobId: "j3" } } });
   const res = await fabAction(3, "invalid");
   assert.equal(res.ok, true);
-  assert.match(res.message, /Opening the next job: Data Engineer at Acme/);
-  assert.deepEqual(calls.api.slice(0, 2).map((c) => c.slice(0, 2)), [["reportJobInvalid", "j3"], ["nextJob", "j3"]]);
-  assert.equal(calls.api[1][2], "ready");
-  assert.deepEqual(calls.navigated, [[3, "https://boards.example.com/jobs/4/apply"]]);
-  assert.deepEqual(await jobForTab(3), { jobId: "j4", source: "apply" }, "the tab now belongs to the next job, not the hand-off");
+  assert.deepEqual(calls.api.map((c) => c.slice(0, 2)), [["reportJobInvalid", "j3"]]);
+  assert.deepEqual(calls.closed, [3]);
+  assert.deepEqual(calls.navigated, [], "the tab is closed, never reused for another job");
+  assert.equal(await jobForTab(3), null, "the closed tab no longer maps to a job");
+  assert.deepEqual(await jobForTab(5), { jobId: "j5", source: "apply" }, "other job tabs are untouched");
+  assert.ok(!("aaHandoff:3" in (await chrome.storage.session.get(["aaHandoff:3"]))));
 });
 
-test("Invalid with no job left reports it and says so, without navigating", async () => {
-  const { fabAction, calls } = load({ session: { applyTabJobs: { 3: { jobId: "j3", at: now } } } });
-  const res = await fabAction(3, "invalid");
-  assert.equal(res.ok, true);
-  assert.match(res.message, /last job in Ready to apply/);
-  assert.deepEqual(calls.navigated, []);
+test("the tab closes when the side panel or the auto-apply console handled Invalid, and stays open when it failed", async () => {
+  const panel = load({ session: { applyTabJobs: { 3: { jobId: "j3", at: now } } }, panelOpen: true, replies: { PAGE_JOB_ACTION: { ok: true, state: "idle", message: "Reported as invalid." } } });
+  assert.equal((await panel.fabAction(3, "invalid")).ok, true);
+  assert.deepEqual(panel.calls.closed, [3]);
+
+  const consoleRun = load({ session: { "aaTab:4": { jobId: "j4" } }, consoleOpen: true, replies: { AA_TAB_ACTION: { ok: true, state: "idle", message: "Marked invalid.", closing: true } } });
+  assert.equal((await consoleRun.fabAction(4, "invalid")).ok, true);
+  assert.deepEqual(consoleRun.calls.closed, [4]);
+
+  const failing = load({ session: { applyTabJobs: { 3: { jobId: "j3", at: now } } }, reportFails: true });
+  const res = await failing.fabAction(3, "invalid");
+  assert.equal(res.ok, false);
+  assert.deepEqual(failing.calls.closed, [], "a report that failed keeps the tab");
+
+  const applied = load({ session: { applyTabJobs: { 3: { jobId: "j3", at: now } } } });
+  assert.equal((await applied.fabAction(3, "applied")).ok, true);
+  assert.deepEqual(applied.calls.closed, [], "Applied never closes the tab");
 });

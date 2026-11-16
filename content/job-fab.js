@@ -1,6 +1,6 @@
 // The corner toolbar on application pages NAO opened for a job: four small icon buttons.
 //   ✓✓  Applied        record the application as applied
-//   ✕   Invalid        report the posting (expired, filled, broken); asks for a second click to confirm
+//   ✕   Invalid        report the posting (expired, filled, broken) and close this tab, in one click
 //   ⏭   Skip           set the job aside (auto-apply: try it after the rest of the queue; panel: next job)
 //   »   Open in NAO    open the side panel on this job (fill again, documents, details)
 // Auto-apply's jobs are acted on by the auto-apply console, jobs the side panel opened by the panel, others by the
@@ -17,7 +17,6 @@
 
   const PREF_KEY = "aaPageButtons";
   const NOTE_MS = 6_000;
-  const CONFIRM_MS = 3_000;
 
   const ICONS = {
     applied: '<path d="M18 6 7 17l-5-5"/><path d="m22 10-7.5 7.5L13 16"/>',
@@ -98,7 +97,7 @@
 
   const HINTS = {
     applied: "<b>Mark as applied</b><br>Records this application as applied.",
-    invalid: "<b>Mark as invalid</b><br>The posting is expired, filled or broken. Removes it from your lists.",
+    invalid: "<b>Mark as invalid</b><br>The posting is expired, filled or broken. Removes it from your lists and closes this tab.",
     skip: "<b>Skip</b><br>Sets this job aside and moves on.",
     open: "<b>Open in NAO</b><br>Fill again, see your tailored resume and cover letter, and the job's details.",
   };
@@ -193,16 +192,8 @@
 
   async function act(action) {
     if (busy) return;
-    if (action === "invalid" && !byAction.invalid.dataset.armed) {
-      byAction.invalid.dataset.armed = "1";
-      byAction.invalid.setAttribute("aria-label", "Click again to mark as invalid");
-      setTip("<b>Mark this posting invalid?</b><br>Click ✕ again to confirm.");
-      armTimer = setTimeout(() => {
-        disarm();
-        hideTip();
-      }, CONFIRM_MS);
-      return;
-    }
+    // One click: Mark as invalid reports the posting and closes this tab (a second "confirm" click read as a
+    // button that did nothing).
     disarm();
     busy = true;
     actionBtns.forEach((b) => (b.disabled = true));
