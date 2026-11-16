@@ -5991,16 +5991,66 @@
     record(rep, label, await writeField(c, value));
   }
 
+  // Does a work-entry field already hold the profile's value? Dates compare month and year; text compares words.
+  function workFieldMatches(c, value) {
+    if (isDateContainer(c)) {
+      const [mm, yyyy] = String(value).split("/");
+      const num = (el) => (el ? parseInt(el.value || el.getAttribute("aria-valuenow") || "", 10) : NaN);
+      return (
+        num(c.querySelector(AID("dateSectionMonth-input"))) === parseInt(mm, 10) &&
+        num(c.querySelector(AID("dateSectionYear-input"))) === parseInt(yyyy, 10)
+      );
+    }
+    const t = c.querySelector('input[type="text"], textarea, input:not([type])');
+    const norm = (s) => String(s || "").replace(/\s+/g, " ").trim().toLowerCase();
+    return !!t && norm(t.value) === norm(value);
+  }
+
+  // A work entry is the profile's, field by field. Workday's resume parse pre-fills these panels and often
+  // gets them wrong (issue #39: a current role read as "From 10/2023 To 09/2023", joining two roles), so a
+  // parsed value that differs is replaced. Recovery passes never come here (they skip work panels).
+  async function setWorkField(root, key, value, rep, label) {
+    if (value == null || value === "") return;
+    const c = panelField(root, key);
+    if (!c) return;
+    if (fieldHasCommittedValue(c) && workFieldMatches(c, value)) {
+      record(rep, label, true);
+      return;
+    }
+    record(rep, label, await writeField(c, value));
+  }
+
+  // "I currently work here": ticked for the current role; Workday then removes the End Date ("To") field, so a
+  // To left behind means the tick did not take.
+  async function setCurrentRole(root, n, rep) {
+    const c = panelField(root, "currentlyWorkHere");
+    if (!c) return;
+    const box = c.querySelector('input[type="checkbox"]');
+    if (box && !box.checked) await writeField(c, true);
+    let gone = false;
+    for (let i = 0; i < 25 && !gone; i++) {
+      gone = !panelField(root, "endDate") || !!(box && box.checked);
+      if (!gone) await D.delay(100);
+    }
+    record(rep, `Work ${n} Current`, !!(box ? box.checked : gone));
+  }
+
   async function fillWorkPanel(root, entry, n, rep) {
     if (!entry) return;
-    await fillPanelField(root, "jobTitle", entry.title, rep, `Work ${n} Job Title`);
-    await fillPanelField(root, "companyName", entry.company, rep, `Work ${n} Company`);
-    await fillPanelField(root, "location", entry.location, rep, `Work ${n} Location`);
-    if (entry.current) await fillPanelField(root, "currentlyWorkHere", true, rep, `Work ${n} Current`);
-    await fillPanelField(root, "startDate", entry.startMMYYYY, rep, `Work ${n} From`);
-    // When "I currently work here" is checked Workday removes the End Date field.
-    if (!entry.current) await fillPanelField(root, "endDate", entry.endMMYYYY, rep, `Work ${n} To`);
-    await fillPanelField(root, "roleDescription", stripMarkdown(entry.description), rep, `Work ${n} Description`);
+    await setWorkField(root, "jobTitle", entry.title, rep, `Work ${n} Job Title`);
+    await setWorkField(root, "companyName", entry.company, rep, `Work ${n} Company`);
+    await setWorkField(root, "location", entry.location, rep, `Work ${n} Location`);
+    if (entry.current) {
+      await setCurrentRole(root, n, rep);
+    } else {
+      // A past role: a parsed "I currently work here" tick would hide its real end date.
+      const cur = panelField(root, "currentlyWorkHere");
+      const box = cur && cur.querySelector('input[type="checkbox"]');
+      if (box && box.checked) await commitCheckable(box, false);
+    }
+    await setWorkField(root, "startDate", entry.startMMYYYY, rep, `Work ${n} From`);
+    if (!entry.current) await setWorkField(root, "endDate", entry.endMMYYYY, rep, `Work ${n} To`);
+    await setWorkField(root, "roleDescription", stripMarkdown(entry.description), rep, `Work ${n} Description`);
   }
 
   // PROVEN root cause (read-back PROBE): our write lands CLEAN, then Workday's
@@ -6047,6 +6097,28 @@
       }
     }
     try { WD.warn("role descriptions: re-assert loop exhausted (parser still fighting)"); } catch {}
+  }
+
+  // Workday's resume parser can land after the panels were filled and put its own reading back: issue #39 showed the
+  // current role unticked with "To 09/2023". Check every entry twice and restore the tick and the dates; only
+  // values that differ are written.
+  async function reassertWorkEntries(work) {
+    if (!(work || []).length) return;
+    for (let round = 0; round < 2; round++) {
+      await D.delay(round ? 1500 : 600);
+      const panels = panelRoots("Work-Experience").slice(0, work.length);
+      const rep = { filled: [], missed: [] };
+      for (let i = 0; i < panels.length; i++) {
+        const e = work[i];
+        if (!e) continue;
+        if (e.current) await setCurrentRole(panels[i], i + 1, rep);
+        await setWorkField(panels[i], "startDate", e.startMMYYYY, rep, `Work ${i + 1} From`);
+        if (!e.current) await setWorkField(panels[i], "endDate", e.endMMYYYY, rep, `Work ${i + 1} To`);
+      }
+      try {
+        WD.log(`work entries re-check ${round + 1}: not held ${JSON.stringify(rep.missed)}`);
+      } catch {}
+    }
   }
 
   function fieldOfStudyCandidates(entry) {
@@ -7108,7 +7180,10 @@
     //    from the uploaded PDF (possibly with markdown) AFTER we set it. Re-assert
     //    clean text until the parser stops clobbering it. Only needed after the
     //    initial pass (the parser runs once, on upload) - skip it on recovery.
-    if (!recovery) await reassertWorkDescriptions(work);
+    if (!recovery) {
+      await reassertWorkDescriptions(work);
+      await reassertWorkEntries(work);
+    }
   }
 
   // flush(): force any deferred text/date commits to run now. Auto-advance focuses
