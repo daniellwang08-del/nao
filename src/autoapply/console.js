@@ -716,8 +716,8 @@ async function applyLater(jobIds) {
 
 /** Hide the job from the user's lists and never try it again. */
 async function markInvalid(jobId) {
-  const h = entryFor(jobId);
-  if (!h) return;
+  // A job without a history entry (stopped before it was recorded) is still reported, never silently kept.
+  const h = entryFor(jobId) || { title: "", message: "" };
   try {
     await api.reportJobInvalid(jobId, `Marked invalid from auto-apply${h.message ? `: ${h.message}` : "."}`.slice(0, 500));
   } catch (err) {
