@@ -1012,7 +1012,7 @@ function Stats({ s }) {
       label="Waiting on you"
       value=${waiting}
       meter=${html`<${Meter} value=${openTabs} max=${s.settings.maxWaiting} tone="warn" />`}
-      sub=${`${openTabs} of ${s.settings.maxWaiting} open tabs before pausing`}
+      sub=${`${openTabs} of ${s.settings.maxWaiting} tabs waiting on you before pausing`}
     />
     <${Stat}
       icon="chart"
@@ -1058,15 +1058,15 @@ function RunSettings({ s }) {
       />
       <${RangeField}
         label="Applications at once"
-        hint="More is faster; each one runs in its own background tab."
+        hint="How many jobs are filled at the same time, each in its own background tab. More is faster."
         value=${st.parallel}
         min=${1}
-        max=${5}
+        max=${10}
         onChange=${(v) => void saveSettings({ parallel: v })}
       />
       <${RangeField}
         label="Pause when waiting on you"
-        hint="Stops starting new ones while this many need your hand."
+        hint="Finished tabs left for you (to submit, solve a check or answer a question). At this many, new jobs stop starting. This does not run more at once; Applications at once does."
         value=${st.maxWaiting}
         min=${1}
         max=${50}
