@@ -153,3 +153,31 @@ test("arrangeQueue by interview chance: tier first, then easier sites, then like
   assert.equal(chanceLabel("high"), "High chance");
   assert.equal(chanceLabel(null), null);
 });
+
+test("site order: the user's ranking decides first (Greenhouse, then Ashby), interview chance within a site", async () => {
+  const { arrangeQueue } = await import("../src/autoapply/model.js");
+  const q = [
+    { id: "lever-high", platform: "lever", tier: 1, likelihoodTier: "high", score: 90 },
+    { id: "ashby-low", platform: "ashby", tier: 1, likelihoodTier: "low", score: 60 },
+    { id: "gh-low", platform: "greenhouse", tier: 1, likelihoodTier: "low", score: 70 },
+    { id: "ashby-high", platform: "ashby", tier: 1, likelihoodTier: "high", score: 80 },
+    { id: "gh-high", platform: "greenhouse", tier: 1, likelihoodTier: "high", score: 75 },
+    { id: "unranked", platform: "workday", tier: 5, likelihoodTier: "high", score: 99 },
+  ];
+  const ids = arrangeQueue(q, { order: "site", siteOrder: ["greenhouse", "ashby", "lever"] }).map((j) => j.id);
+  assert.deepEqual(ids, ["gh-high", "gh-low", "ashby-high", "ashby-low", "lever-high", "unranked"]);
+  // Pinned jobs still come first, and jobs set aside for later still go last.
+  const pinned = arrangeQueue(q, { order: "site", siteOrder: ["greenhouse", "ashby"], pinned: ["lever-high"], later: new Set(["gh-high"]) });
+  assert.equal(pinned[0].id, "lever-high");
+  assert.equal(pinned.at(-1).id, "gh-high");
+});
+
+test("the saved site ranking keeps the user's order and adds sites it does not know yet", async () => {
+  const { normalizeSiteOrder, moveSite } = await import("../src/autoapply/model.js");
+  const all = ["greenhouse", "lever", "ashby", "workable", "oracle"];
+  assert.deepEqual(normalizeSiteOrder(["ashby", "greenhouse", "gone", "ashby"], all), ["ashby", "greenhouse", "lever", "workable", "oracle"]);
+  assert.deepEqual(normalizeSiteOrder(undefined, all), all);
+  assert.deepEqual(moveSite(["greenhouse", "lever", "ashby"], "ashby", -1), ["greenhouse", "ashby", "lever"]);
+  assert.deepEqual(moveSite(["greenhouse", "lever", "ashby"], "greenhouse", -1), ["greenhouse", "lever", "ashby"]);
+  assert.deepEqual(moveSite(["greenhouse", "lever", "ashby"], "lever", 5), ["greenhouse", "ashby", "lever"]);
+});

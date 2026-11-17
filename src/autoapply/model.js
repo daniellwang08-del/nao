@@ -12,7 +12,35 @@ export const ORDERS = [
   { value: "ease", label: "Easiest sites first", hint: "Fewest steps and highest success rate first." },
   { value: "match", label: "Best match first", hint: "Highest match score first, on any enabled site." },
   { value: "newest", label: "Newest first", hint: "Most recently added jobs first." },
+  {
+    value: "site",
+    label: "Your site order",
+    hint: "Sites in the order you rank them under Sites (for example Greenhouse first, then Ashby); within a site, best interview chance first.",
+  },
 ];
+
+/**
+ * The user's site ranking, complete: every known site exactly once, in the saved order, with sites the saved list
+ * does not have yet (new engines, first use) after it in `fallback` order.
+ */
+export function normalizeSiteOrder(saved, fallback) {
+  const known = new Set(fallback);
+  const out = [];
+  for (const id of Array.isArray(saved) ? saved : []) if (known.has(id) && !out.includes(id)) out.push(id);
+  for (const id of fallback) if (!out.includes(id)) out.push(id);
+  return out;
+}
+
+/** `order` with `id` moved by `delta` places (clamped to the list). */
+export function moveSite(order, id, delta) {
+  const list = [...order];
+  const from = list.indexOf(id);
+  if (from < 0) return list;
+  const to = Math.max(0, Math.min(list.length - 1, from + delta));
+  list.splice(from, 1);
+  list.splice(to, 0, id);
+  return list;
+}
 
 /** "High chance" label for a queued job's interview likelihood tier, or null. */
 export function chanceLabel(tier) {
@@ -55,13 +83,17 @@ export function startOfDay(now = Date.now()) {
  */
 const CHANCE_RANK = { high: 0, medium: 1, low: 2 };
 
-export function arrangeQueue(queue, { order = "callback", minScore = 0, pinned = [], later = new Set() } = {}) {
+export function arrangeQueue(queue, { order = "callback", minScore = 0, pinned = [], later = new Set(), siteOrder = [] } = {}) {
   const pins = new Map(pinned.map((id, i) => [id, i]));
   const kept = queue.filter((q) => pins.has(q.id) || !minScore || (q.score != null && q.score >= minScore));
   const chance = (q) => CHANCE_RANK[q.likelihoodTier] ?? 3;
+  const siteRank = new Map(siteOrder.map((id, i) => [id, i]));
+  const rank = (q) => (siteRank.has(q.platform) ? siteRank.get(q.platform) : siteOrder.length);
+  const callback = (a, b) =>
+    chance(a) - chance(b) || a.tier - b.tier || (b.likelihood || 0) - (a.likelihood || 0) || b.score - a.score;
   const by = {
-    callback: (a, b) =>
-      chance(a) - chance(b) || a.tier - b.tier || (b.likelihood || 0) - (a.likelihood || 0) || b.score - a.score,
+    callback,
+    site: (a, b) => rank(a) - rank(b) || callback(a, b),
     ease: (a, b) => a.tier - b.tier || b.score - a.score,
     match: (a, b) => b.score - a.score || a.tier - b.tier,
     newest: (a, b) => (b.createdAt || 0) - (a.createdAt || 0) || a.tier - b.tier,

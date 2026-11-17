@@ -5,6 +5,7 @@ const PATHS = {
   back: ["M15 18l-6-6 6-6"],
   chevron: ["M9 18l6-6-6-6"],
   chevronDown: ["M6 9l6 6 6-6"],
+  chevronUp: ["M18 15l-6-6-6 6"],
   search: ["M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z", "M21 21l-4.3-4.3"],
   settings: [
     "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z",

@@ -11,6 +11,8 @@ import { Badge, Banner, Button, Empty, IconButton, Modal, Score, Segmented, Spin
 import { Icon } from "../panel/ui/icons.js";
 import {
   ORDERS,
+  moveSite,
+  normalizeSiteOrder,
   STAGES,
   appliedToday,
   CLOSED_UNSUBMITTED,
@@ -56,6 +58,8 @@ const DEFAULT_SETTINGS = {
   platforms: RECOMMENDED_FILL,
   submitPlatforms: DEFAULT_SUBMIT_PLATFORMS,
   order: "callback",
+  // Site ranking for the "Your site order" queue order (first = tried first).
+  siteOrder: [],
   minScore: 0,
   perCompany: 0,
   runTimeoutMin: 14,
@@ -129,7 +133,13 @@ function queueOf(s) {
   const skipped = new Set(s.skipped);
   return arrangeQueue(
     s.available.filter((q) => enabled.has(q.platform) && !skipped.has(q.id)),
-    { order: s.settings.order, minScore: s.settings.minScore, pinned: s.pinned, later: laterIds(s.history) },
+    {
+      order: s.settings.order,
+      minScore: s.settings.minScore,
+      pinned: s.pinned,
+      later: laterIds(s.history),
+      siteOrder: normalizeSiteOrder(s.settings.siteOrder, ALL_PLATFORMS),
+    },
   );
 }
 
@@ -1038,10 +1048,11 @@ function RunSettings({ s }) {
           label="Queue order"
           value=${st.order}
           options=${[
-            { value: "callback", label: "Interview chance" },
+            { value: "callback", label: "Chance" },
             { value: "ease", label: "Easiest" },
-            { value: "match", label: "Best match" },
+            { value: "match", label: "Match" },
             { value: "newest", label: "Newest" },
+            { value: "site", label: "Sites" },
           ]}
           onChange=${(v) => void saveSettings({ order: v })}
         />
@@ -1106,7 +1117,7 @@ function RunSettings({ s }) {
   </${Card}>`;
 }
 
-function SiteRow({ id, st, count, disabled }) {
+function SiteRow({ id, st, count, disabled, rank = null, total = 0, onMove = null, onDrop = null }) {
   const fill = st.platforms.includes(id);
   const manual = NEEDS_ACCOUNT.has(id) || id === "board";
   const submit = fill && !manual && st.submitPlatforms.includes(id);
@@ -1116,10 +1127,43 @@ function SiteRow({ id, st, count, disabled }) {
     else list.delete(id);
     void saveSettings({ [key]: [...list] });
   };
-  return html`<div class=${`aa-site${fill ? " is-on" : ""}`}>
+  const ranked = rank != null;
+  // Ranked: drag a row onto another to take its place (the arrows do the same from the keyboard).
+  const drag = ranked
+    ? {
+        draggable: true,
+        onDragStart: (e) => {
+          e.dataTransfer.setData("text/plain", id);
+          e.dataTransfer.effectAllowed = "move";
+          e.currentTarget.classList.add("is-dragging");
+        },
+        onDragEnd: (e) => e.currentTarget.classList.remove("is-dragging"),
+        onDragOver: (e) => {
+          e.preventDefault();
+          e.currentTarget.classList.add("is-drop");
+        },
+        onDragLeave: (e) => e.currentTarget.classList.remove("is-drop"),
+        onDrop: (e) => {
+          e.preventDefault();
+          e.currentTarget.classList.remove("is-drop");
+          const from = e.dataTransfer.getData("text/plain");
+          if (from && from !== id) onDrop(from, id);
+        },
+      }
+    : {};
+  return html`<div class=${`aa-site${fill ? " is-on" : ""}${ranked ? " is-ranked" : ""}`} title=${ranked ? `${label(id)}: drag to change its turn` : null} ...${drag}>
+    ${rank != null
+      ? html`<div class="aa-site-rank">
+          <span class="aa-rank-no" aria-hidden="true">${rank + 1}</span>
+          <span class="aa-rank-moves">
+            <${IconButton} icon="chevronUp" size=${13} label=${`Move ${label(id)} up`} disabled=${rank === 0} onClick=${() => onMove(id, -1)} />
+            <${IconButton} icon="chevronDown" size=${13} label=${`Move ${label(id)} down`} disabled=${rank === total - 1} onClick=${() => onMove(id, 1)} />
+          </span>
+        </div>`
+      : null}
     <div class="aa-site-name">
       <span class="aa-site-title">${label(id)}</span>
-      <span class=${`aa-ease aa-tier-${Math.min(easeTier(id), 5)}`}>${easeLabel(id)}</span>
+      ${ranked ? null : html`<span class=${`aa-ease aa-tier-${Math.min(easeTier(id), 5)}`}>${easeLabel(id)}</span>`}
       ${count ? html`<span class="aa-site-count" title=${`${count} ready`}>${count}</span>` : null}
     </div>
     <label class="aa-switch" title=${manual ? "Opens the page for you to finish" : "Fill the form"}>
@@ -1135,17 +1179,43 @@ function SiteRow({ id, st, count, disabled }) {
   </div>`;
 }
 
+/** "Your site order: Greenhouse, Ashby, Lever, ..." or the order's label, plus the score floor. */
+function queueHint(st) {
+  const order = ORDERS.find((o) => o.value === st.order) || ORDERS[0];
+  let text = order.label;
+  if (st.order === "site") {
+    const on = new Set(st.platforms);
+    const top = normalizeSiteOrder(st.siteOrder, ALL_PLATFORMS).filter((id) => on.has(id));
+    if (top.length) text = `Site order: ${top.slice(0, 3).map(label).join(", ")}${top.length > 3 ? ", ..." : ""}`;
+  }
+  return text + (st.minScore ? `, match ${st.minScore}+` : "");
+}
+
 function Sites({ s }) {
   const st = s.settings;
   const counts = s.available.reduce((m, q) => ((m[q.platform] = (m[q.platform] || 0) + 1), m), {});
   const disabled = s.phase !== "idle";
   const preset = (platforms, submitPlatforms) => void saveSettings({ platforms, submitPlatforms });
+  const ranked = st.order === "site";
+  const siteOrder = normalizeSiteOrder(st.siteOrder, ALL_PLATFORMS);
+  // Reordering only changes which job starts next, so it stays available while auto-apply runs.
+  const move = (id, delta) => void saveSettings({ siteOrder: moveSite(siteOrder, id, delta) });
+  const dropOn = (from, to) => void saveSettings({ siteOrder: moveSite(siteOrder, from, siteOrder.indexOf(to) - siteOrder.indexOf(from)) });
+  const ids = ranked ? siteOrder : ALL_PLATFORMS;
   return html`<${Card}
     title="Sites"
     icon="globe"
-    meta=${`${st.platforms.length} on`}
-    hint="Fill opens and completes the form. Submit sends it in live mode. Sites are listed easiest first."
+    meta=${ranked ? `${st.platforms.length} on, ranked` : `${st.platforms.length} on`}
+    hint=${ranked
+      ? "The queue takes sites from the top down. Drag a site, or use its arrows, to change its turn. Fill completes the form; Submit sends it in live mode."
+      : "Fill opens and completes the form. Submit sends it in live mode. Sites are listed easiest first."}
   >
+    ${ranked
+      ? null
+      : html`<div class="aa-rank-tip">
+          <span>Want Greenhouse first, then Ashby?</span>
+          <${Button} size="sm" variant="ghost" onClick=${() => void saveSettings({ order: "site" })}>Rank sites</${Button}>
+        </div>`}
     <div class="aa-presets">
       <${Button} size="sm" variant="ghost" disabled=${disabled} onClick=${() => preset(RECOMMENDED_FILL, DEFAULT_SUBMIT_PLATFORMS)}>Recommended</${Button}>
       <${Button} size="sm" variant="ghost" disabled=${disabled} onClick=${() => preset(ALL_PLATFORMS, DEFAULT_SUBMIT_PLATFORMS)}>All sites</${Button}>
@@ -1153,7 +1223,20 @@ function Sites({ s }) {
       <${Button} size="sm" variant="ghost" disabled=${disabled} onClick=${() => preset([], [])}>None</${Button}>
     </div>
     <div class="aa-sites">
-      ${ALL_PLATFORMS.map((id) => html`<${SiteRow} key=${id} id=${id} st=${st} count=${counts[id] || 0} disabled=${disabled} />`)}
+      ${ids.map(
+        (id, i) =>
+          html`<${SiteRow}
+            key=${id}
+            id=${id}
+            st=${st}
+            count=${counts[id] || 0}
+            disabled=${disabled}
+            rank=${ranked ? i : null}
+            total=${ids.length}
+            onMove=${move}
+            onDrop=${dropOn}
+          />`,
+      )}
     </div>
     ${disabled ? html`<p class="aa-card-hint aa-pad">Stop auto-apply to change sites.</p>` : null}
   </${Card}>`;
@@ -1220,7 +1303,7 @@ function Queue({ s }) {
     title="Queue"
     icon="list"
     meta=${queue.length}
-    hint=${ORDERS.find((o) => o.value === s.settings.order)?.label + (s.settings.minScore ? `, match ${s.settings.minScore}+` : "")}
+    hint=${queueHint(s.settings)}
     action=${html`<div class="aa-card-tools">
       <label class="aa-search">
         <${Icon} name="search" size=${14} />
