@@ -16,6 +16,7 @@ import { handleAutofillMessage, startAutofill } from "../panel/autofill/index.js
 import { setFocusGate } from "../panel/autofill/shared.js";
 import { emptyAutofill, setState, state } from "../panel/state.js";
 import { AGGREGATOR_HOSTS, NEEDS_ACCOUNT, applyPageUrl, hostOf } from "./platforms.js";
+import { createRecorder } from "./recorder.js";
 import { keepAwake, wakeTab } from "./wake.js";
 
 const AA_TAB_PREFIX = "aaTab:";
@@ -34,6 +35,9 @@ const refillTabId = params.get("tab") ? Number(params.get("tab")) : null;
 
 let submittedSignal = null;
 let ownTabId = null;
+let lastPlatform = null;
+// Records the run only for accounts an admin enabled; otherwise every call is a no-op.
+const recorder = createRecorder({ jobId });
 
 function delay(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -42,10 +46,12 @@ function delay(ms) {
 const localTz = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 function report(patch) {
+  if (patch && patch.platform) lastPlatform = patch.platform;
   if (console_) console_.update(jobId, patch);
 }
 
 function step(message) {
+  recorder.step(message);
   report({ message });
 }
 
@@ -410,8 +416,10 @@ async function run(cfg) {
   setState({ job, autoApplySubmit: maySubmit });
 
   step("Filling the application…");
+  await recorder.snapshot(tab.id, "form");
   const result = await fill(tab);
   report({ filled: result.filled });
+  await recorder.snapshot(tab.id, "after_fill");
   if (result.needs.length) throw needsYou("Needs your input: " + result.needs.slice(0, 4).join("; "));
   if (result.submitted) {
     report({ submittedAt: Date.now() });
@@ -479,6 +487,7 @@ async function refill() {
   setState({ job, autoApplySubmit: false });
 
   step("Filling the application…");
+  await recorder.snapshot(tab.id, "form");
   let result;
   try {
     result = await fill(tab);
@@ -502,9 +511,26 @@ async function refill() {
   return { status: "filled", message: "Filled again. Review the form and submit it." };
 }
 
+/** Recorded accounts only: the final page and the trail of a run that did not finish go to the server. */
+async function recordOutcome(outcome) {
+  try {
+    if (!["failed", "needs_you", "invalid"].includes(outcome.status)) return;
+    recorder.step(`Outcome: ${outcome.status}: ${outcome.message || ""}`);
+    let pageUrl = null;
+    if (ownTabId != null) {
+      pageUrl = await chrome.tabs.get(ownTabId).then((t) => t.url, () => null);
+      await recorder.snapshot(ownTabId, "final", { wait: true });
+    }
+    await recorder.finish(outcome, { platform: lastPlatform, pageUrl, autofill: state.autofill });
+  } catch {
+    /* recording never changes the run */
+  }
+}
+
 async function main() {
   if (!console_ || !jobId) return;
   const cfg = console_.config(jobId);
+  recorder.start();
   let outcome;
   try {
     outcome = refillTabId != null ? await refill() : await run(cfg);
@@ -514,6 +540,7 @@ async function main() {
         ? { status: err.status, message: err.message, ...err.extra }
         : { status: "failed", message: (err && err.message) || String(err) };
   }
+  await recordOutcome(outcome);
   if (ownTabId != null) await chrome.storage.session.remove(AA_TAB_PREFIX + ownTabId).catch(() => {});
   console_.finish(jobId, { ...outcome, tabId: ownTabId });
 }
