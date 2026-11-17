@@ -60,6 +60,13 @@
         if (ab && ab.length) return ab;
       }
     } catch {}
+    // Oracle: a checkbox list is one row of unnamed hidden checkboxes (see AF.oracle.groupInputs).
+    try {
+      if (AF.oracle && AF.oracle.groupInputs) {
+        const og = AF.oracle.groupInputs(root);
+        if (og && og.length) return og;
+      }
+    } catch {}
     // Dayforce: Ant checkbox groups have no name; the group is the .ant-checkbox-group / .ant-radio-group.
     try {
       if (AF.dayforce && AF.dayforce.groupInputs) {
@@ -81,6 +88,12 @@
   function groupLabel(root) {
     const atjTitle = atjQuestionTitle(root);
     if (atjTitle) return atjTitle;
+    try {
+      if (AF.oracle && AF.oracle.questionTitleFor) {
+        const q = AF.oracle.questionTitleFor(root);
+        if (q) return q;
+      }
+    } catch {}
     try {
       if (AF.dayforce && AF.dayforce.isDayforcePage && AF.dayforce.isDayforcePage()) {
         const q = AF.dayforce.questionTitleFor(root);
@@ -437,6 +450,23 @@
         if (!best.checked) activateOption(best);
         return !!best.checked && group.every((i) => i === best || !i.checked);
       }
+      // Oracle checkbox lists: the answer is the complete set. Tick exactly those options and clear the rest, which
+      // also repairs a page an earlier pass ticked wholesale (issue #42).
+      try {
+        if (multi && AF.oracle && AF.oracle.isCheckboxList && AF.oracle.isCheckboxList(root)) {
+          const picked = new Set(values.map((v) => bestOptionFor(group, clean(v).toLowerCase())).filter(Boolean));
+          if (!picked.size) return false;
+          for (const inp of group) {
+            if (!picked.has(inp) && inp.checked) {
+              try {
+                inp.click();
+              } catch {}
+            }
+          }
+          for (const inp of picked) if (!inp.checked) activateOption(inp);
+          return group.every((inp) => inp.checked === picked.has(inp));
+        }
+      } catch {}
       // Ashby race/ethnicity (and similar): when the answer is a single option,
       // clear any previously checked siblings first. A prior buggy pass may have
       // checked every box; choose() alone only adds matches and never unchecks.

@@ -179,10 +179,15 @@
   };
 
   // Best option for `want`: exact > alias > word-start > contains (the shortest wins ties).
+  // "not", "no", "non", "decline"... An answer and an option must agree on it: "I am not a protected veteran" must
+  // never land on "Protected Veteran" (issue #42).
+  const NEGATION = /(^| )(not|no|non|none|never|dont|don t|do not|decline|without)( |$)/;
+
   function bestText(options, want, textFn = (x) => x) {
     const w = norm(want);
     if (!w) return null;
     const wa = ALIASES[w] || w;
+    const wNeg = NEGATION.test(w);
     const scored = [];
     for (const o of options) {
       const t = norm(textFn(o));
@@ -196,9 +201,11 @@
       else if ((" " + t + " ").includes(" " + wa + " ") || (" " + t + " ").includes(" " + w + " ")) score = 55;
       else if (t.includes(w) || t.includes(wa)) score = 50;
       else if (w.includes(t) && t.length > 3) score = 40;
-      if (score) scored.push({ o, score, len: t.length });
+      if (score && score < 90 && NEGATION.test(t) !== wNeg) score -= 35;
+      if (score > 0) scored.push({ o, score, len: t.length });
     }
-    scored.sort((a, b) => b.score - a.score || a.len - b.len);
+    // Ties: an option the answer contains is better the more of the answer it covers; otherwise the shorter one.
+    scored.sort((a, b) => b.score - a.score || (a.score === 40 ? b.len - a.len : a.len - b.len));
     return scored.length ? scored[0].o : null;
   }
 
@@ -1233,6 +1240,33 @@
     return false;
   }
 
+  // Oracle checkbox lists ("Select the races you identify with.") give each option its own hidden checkbox with no
+  // shared name, inside one .input-row--radiogroup row. They are ONE multi-choice question, not a yes/no each:
+  // treated singly, every option looked like "tick this?" and all of them were ticked (issue #42).
+  function checkboxListRow(el) {
+    if (!isOraclePage() || !el || (el.type || "").toLowerCase() !== "checkbox") return null;
+    const row = el.closest && el.closest(".input-row");
+    if (!row || !row.querySelector(".input-row__control-item")) return null;
+    const boxes = row.querySelectorAll('input[type="checkbox"]');
+    return boxes.length > 1 ? row : null;
+  }
+
+  function groupInputs(el) {
+    const row = checkboxListRow(el);
+    return row ? [...row.querySelectorAll('input[type="checkbox"]')] : null;
+  }
+
+  function questionTitleFor(el) {
+    const row = checkboxListRow(el);
+    if (!row) return "";
+    const lab = row.querySelector(":scope > .input-row__label, :scope > form-element-label .input-row__label, .input-row__label, legend");
+    return textOf(lab).replace(/\*+$/, "").trim().slice(0, 200);
+  }
+
+  function isCheckboxList(el) {
+    return !!checkboxListRow(el);
+  }
+
   // Hidden-control checkboxes and radios count as fillable when their styled label shows.
   function hasVisibleProxy(el) {
     return isOraclePage() && !!el && el.classList && el.classList.contains("input-row__hidden-control") && controlShown(el);
@@ -1283,6 +1317,9 @@
     visibleErrors,
     shouldSkipControl,
     hasVisibleProxy,
+    groupInputs,
+    questionTitleFor,
+    isCheckboxList,
     applicationRoot,
     markOwned,
     // widgets, for the drivers

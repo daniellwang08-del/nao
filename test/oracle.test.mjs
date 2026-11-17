@@ -162,3 +162,17 @@ test("the address search picks the suggestion that is the candidate's address", 
   assert.equal(pick(items, (x) => x), "4410 128TH SE PLACE, KENT, WASHINGTON, 98030");
   assert.equal(pick(["9 OTHER ST, KENT, WASHINGTON"], (x) => x), null);
 });
+
+test("a negative answer never lands on the positive option (issue #42: 'Protected Veteran')", () => {
+  const { bestText } = oracle()._test;
+  const vet = ["Protected Veteran", "Not a Protected Veteran", "I choose not to self-identify"];
+  assert.equal(bestText(vet, "I am not a protected veteran"), "Not a Protected Veteran");
+  assert.equal(bestText(vet, "Not a protected veteran"), "Not a Protected Veteran");
+  assert.equal(bestText(vet, "Protected Veteran"), "Protected Veteran");
+  assert.equal(bestText(vet, "I am a protected veteran"), "Protected Veteran");
+  const vet2 = ["I identify as one or more of the classifications of protected veteran", "I am not a protected veteran", "I do not wish to self-identify"];
+  assert.equal(bestText(vet2, "Not a Protected Veteran"), "I am not a protected veteran");
+  assert.equal(bestText(["Hispanic or Latino", "Not Hispanic or Latino", "Decline to answer"], "Not Hispanic or Latino"), "Not Hispanic or Latino");
+  assert.equal(bestText(["Yes, I have a disability", "No, I do not have a disability"], "No, I do not have a disability"), "No, I do not have a disability");
+  assert.equal(bestText(["Yes, I have a disability", "No, I do not have a disability"], "I do not have a disability"), "No, I do not have a disability");
+});
