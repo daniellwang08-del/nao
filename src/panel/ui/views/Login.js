@@ -1,6 +1,6 @@
 import { html, useEffect, useState } from "../../../lib/preact.js";
 import * as storage from "../../../storage.js";
-import { changeServer, signIn } from "../../actions/session.js";
+import { changeServer, signIn, verifyCode } from "../../actions/session.js";
 import { Banner, Button } from "../components.js";
 
 function hostOf(url) {
@@ -47,6 +47,69 @@ function ServerField({ backendUrl }) {
   </form>`;
 }
 
+/** Two-step sign-in: the account has it on, so after the password comes a code from the authenticator app. */
+function CodeStep({ ticket, email, remember, onBack }) {
+  const [code, setCode] = useState("");
+  const [backup, setBackup] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const ready = backup ? code.trim().length >= 10 : code.length === 6;
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!ready) return;
+    setBusy(true);
+    setError(null);
+    const err = await verifyCode({ ticket, code, email, remember });
+    setBusy(false);
+    if (err) {
+      setError(err);
+      setCode("");
+    }
+  };
+
+  return html`<div class="login">
+    <div class="login-brand">
+      <img src="icons/icon128.png" alt="" width="44" height="44" />
+      <h1>Two-step sign-in</h1>
+      <p>${backup ? `Enter one of your backup codes for ${email}.` : `Enter the 6-digit code from your authenticator app for ${email}.`}</p>
+    </div>
+    <form class="login-form" onSubmit=${submit} noValidate>
+      ${error ? html`<${Banner} tone="danger">${error}</${Banner}>` : null}
+      <label class="field">
+        <span class="field-label">${backup ? "Backup code" : "Code"}</span>
+        <input
+          class="input"
+          id="nao-login-code"
+          name="code"
+          autocomplete="one-time-code"
+          inputmode=${backup ? "text" : "numeric"}
+          maxlength=${backup ? 11 : 6}
+          placeholder=${backup ? "abcde-fghjk" : "123456"}
+          value=${code}
+          onInput=${(e) => setCode(backup ? e.currentTarget.value : e.currentTarget.value.replace(/\D/g, ""))}
+          autofocus
+        />
+      </label>
+      <${Button} variant="primary" type="submit" busy=${busy} disabled=${!ready} block>Verify and sign in</${Button}>
+      <div class="row-actions">
+        <button type="button" class="link" onClick=${onBack}>Back</button>
+        <button
+          type="button"
+          class="link"
+          onClick=${() => {
+            setBackup(!backup);
+            setCode("");
+            setError(null);
+          }}
+        >
+          ${backup ? "Use the app code" : "Lost your phone? Use a backup code"}
+        </button>
+      </div>
+    </form>
+  </div>`;
+}
+
 export function LoginView({ s }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -54,6 +117,7 @@ export function LoginView({ s }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [websiteOpened, setWebsiteOpened] = useState(false);
+  const [mfa, setMfa] = useState(null);
 
   useEffect(() => {
     storage.getRememberedEmail().then((saved) => {
@@ -69,15 +133,22 @@ export function LoginView({ s }) {
     }
     setBusy(true);
     setError(null);
-    const err = await signIn({ email, password, remember });
+    const result = await signIn({ email, password, remember });
     setBusy(false);
-    if (err) setError(err);
+    if (result && typeof result === "object") {
+      setPassword("");
+      setMfa(result);
+    } else if (result) setError(result);
   };
 
   const signInOnWebsite = () => {
     setWebsiteOpened(true);
     chrome.tabs.create({ url: `${s.backendUrl.replace(/\/+$/, "")}/extension/connect`, active: true }).catch(() => {});
   };
+
+  if (mfa) {
+    return html`<${CodeStep} ticket=${mfa.mfaTicket} email=${mfa.email || email.trim()} remember=${remember} onBack=${() => setMfa(null)} />`;
+  }
 
   return html`<div class="login">
     <div class="login-brand">

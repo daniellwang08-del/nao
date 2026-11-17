@@ -2,7 +2,7 @@
 // token from /auth/login, never the dashboard cookie: Chrome can attach that
 // cookie to extension fetches, and an expired one would 401 a valid request.
 
-import { clearToken, getBackendUrl, getToken, setCurrentUser, setToken } from "./storage.js";
+import { clearToken, getBackendUrl, getDeviceId, getToken, setCurrentUser, setToken } from "./storage.js";
 
 const API_PREFIX = "/api/v1";
 const DEFAULT_TIMEOUT_MS = 20_000;
@@ -79,6 +79,8 @@ async function send(path, { method = "GET", body, form, auth = true, timeoutMs =
   const base = await getBackendUrl();
   const headers = {};
   if (accept) headers.Accept = accept;
+  const deviceId = await getDeviceId();
+  if (deviceId) headers["X-NAO-Device"] = deviceId;
   if (auth) {
     const token = await getToken();
     if (token) headers.Authorization = `Bearer ${token}`;
@@ -172,18 +174,51 @@ const qs = (params) => {
 
 // ── auth ─────────────────────────────────────────────────────────────────────
 
-export async function login(email, password) {
-  await clearToken();
-  const data = await apiFetch("/auth/login", {
-    method: "POST",
-    body: { email, password, long_lived: true },
-    auth: false,
-  });
+/** Browser traits for the server's security records (timezone, language, platform, extension version). */
+export function clientTraits() {
+  let tz = "";
+  try {
+    tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+  } catch {
+    /* ignore */
+  }
+  const nav = globalThis.navigator || {};
+  return {
+    tz,
+    lang: nav.language || "",
+    screen: globalThis.screen ? `${globalThis.screen.width}x${globalThis.screen.height}` : "",
+    platform: (nav.userAgentData && nav.userAgentData.platform) || nav.platform || "",
+    app: `extension/${chrome.runtime.getManifest().version}`,
+  };
+}
+
+async function finishLogin(data) {
   if (!data || !data.access_token) throw new ApiError("Sign in did not return a session. Update the server.", 500);
   await setToken(data.access_token);
   const user = { user_id: data.user_id, email: data.email };
   await setCurrentUser(user);
   return user;
+}
+
+/**
+ * Password sign-in. Returns the user, or `{ mfaTicket, email }` when the account uses two-step sign-in
+ * (then call loginWithCode with the code from the authenticator app).
+ */
+export async function login(email, password) {
+  await clearToken();
+  const data = await apiFetch("/auth/login", {
+    method: "POST",
+    body: { email, password, long_lived: true, mfa_capable: true, client: clientTraits() },
+    auth: false,
+  });
+  if (data && data.mfa_required && data.mfa_ticket) return { mfaTicket: data.mfa_ticket, email: data.email || email };
+  return finishLogin(data);
+}
+
+/** Second step: the 6-digit code (or a backup code) for the ticket login() returned. */
+export async function loginWithCode(ticket, code) {
+  const data = await apiFetch("/auth/login/mfa", { method: "POST", body: { ticket, code }, auth: false });
+  return finishLogin(data);
 }
 
 /** Revoke the token on the server (best effort, so sign-out works offline), then forget it. */

@@ -46,7 +46,19 @@ export async function reloadSession() {
   if (state.user) toast(`Signed in as ${state.user.email}.`, "ok");
 }
 
-/** @returns {Promise<string|null>} error message, or null on success */
+async function startSession(user, email, remember) {
+  await storage.setRememberedEmail(remember ? email : "");
+  setState({ user, cache: await storage.getCache(user.user_id) });
+  await refreshAccount({ quiet: true });
+  await goHome();
+  live.start();
+  await consumePendingHandoffs();
+}
+
+/**
+ * @returns {Promise<string|null|{mfaTicket: string, email: string}>} error message, null on success, or the
+ *   two-step ticket when the account needs a code next (see verifyCode).
+ */
 export async function signIn({ email, password, remember }) {
   const backendUrl = await storage.getBackendUrl();
   setState({ backendUrl });
@@ -54,16 +66,23 @@ export async function signIn({ email, password, remember }) {
     return `Allow access to ${new URL(backendUrl).host} to sign in.`;
   }
   try {
-    const user = await api.login(email.trim(), password);
-    await storage.setRememberedEmail(remember ? email : "");
-    setState({ user, cache: await storage.getCache(user.user_id) });
-    await refreshAccount({ quiet: true });
-    await goHome();
-    live.start();
-    await consumePendingHandoffs();
+    const result = await api.login(email.trim(), password);
+    if (result && result.mfaTicket) return result;
+    await startSession(result, email, remember);
     return null;
   } catch (err) {
     return messageOf(err, "Sign in failed.");
+  }
+}
+
+/** @returns {Promise<string|null>} error message, or null on success */
+export async function verifyCode({ ticket, code, email, remember }) {
+  try {
+    const user = await api.loginWithCode(ticket, code.trim());
+    await startSession(user, email, remember);
+    return null;
+  } catch (err) {
+    return messageOf(err, "That code didn't work. Try again.");
   }
 }
 

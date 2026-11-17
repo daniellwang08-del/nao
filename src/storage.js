@@ -16,6 +16,27 @@ const LOCAL = chrome.storage.local;
 
 // ── auth ─────────────────────────────────────────────────────────────────────
 
+// Random ID of this extension install, sent as X-NAO-Device so sign-ins are recognised by device, not IP
+// (most users are behind a VPN). Kept across sign-outs; it identifies the browser, not the person.
+const DEVICE_KEY = "naoDeviceId";
+let devicePromise = null;
+
+export function getDeviceId() {
+  if (!devicePromise) {
+    devicePromise = (async () => {
+      const got = (await LOCAL.get(DEVICE_KEY))[DEVICE_KEY];
+      if (typeof got === "string" && /^[A-Za-z0-9_-]{16,64}$/.test(got)) return got;
+      const id = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
+      await LOCAL.set({ [DEVICE_KEY]: id });
+      return id;
+    })().catch(() => {
+      devicePromise = null;
+      return null;
+    });
+  }
+  return devicePromise;
+}
+
 export async function getToken() {
   const { token } = await LOCAL.get("token");
   return token || null;
