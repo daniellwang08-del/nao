@@ -232,6 +232,12 @@
         continue;
       }
       if (!isVisible(el)) continue;
+      // A react-select search box never holds the choice: the chosen value or chips sit beside it (a multi-select
+      // keeps the box visible and empty after picking).
+      if (el.getAttribute("role") === "combobox") {
+        const shell = el.closest(".select-shell, .select__control, [class*='-container'], [class*='select__value-container']");
+        if (shell && shell.querySelector("[class*='single-value'], [class*='singleValue'], [class*='multi-value'], [class*='multiValue']")) continue;
+      }
       if (!String(el.value || "").trim()) out.push(labelFor(el));
     }
     // Lever marks Resume/CV required only visually (no required attribute), and

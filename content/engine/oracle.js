@@ -1014,6 +1014,11 @@
       done.country = await cxPick(countryInput, country);
       await delay(600); // the address format re-renders for the country
     }
+    // The street/postal rows render a moment after the country (instantly matched when it was already set).
+    await waitUntil(() => {
+      const b = addressBlock();
+      return b && rowByLabel(b, /address line 1|street|^address$|postal|zip|^(city|town)/i);
+    }, 5000, 150);
     const fresh = addressBlock() || block;
     const l1 = rowByLabel(fresh, /address line 1|street|^address$/i);
     const l1Input = l1 && l1.querySelector("input, textarea");
@@ -1072,8 +1077,17 @@
       }
       done.county = !!clean(countyInput.value) || !countyRow.querySelector(".input-row__label--required, .cx-select__label--required");
     }
-    const ok = Object.values(done).every(Boolean);
-    return { ok, present: true, done };
+    // Done only when the page agrees: every required row in the block holds a value. Otherwise the generic fill
+    // keeps the block (the run must not mark it owned with required fields still empty).
+    await delay(800);
+    const end = addressBlock() || fresh;
+    const emptyRequired = [...end.querySelectorAll(".input-row")].filter((row) => {
+      if (!row.querySelector(".input-row__label--required, .cx-select__label--required")) return false;
+      const input = row.querySelector("input:not([type=hidden]), textarea");
+      return input && !clean(input.value);
+    });
+    const ok = Object.values(done).every(Boolean) && !emptyRequired.length;
+    return { ok, present: true, done, emptyRequired: emptyRequired.length };
   }
 
   // "WA", "Washington" and "Washington (WA)" are the same state.

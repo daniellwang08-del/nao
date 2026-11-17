@@ -307,6 +307,10 @@ export const getVerificationCode = ({ since, company, exclude } = {}) =>
     { timeoutMs: 60_000 }
   );
 
+/** Latest emailed account-verification link to `host` received after `since` (unix seconds): { connected, link } */
+export const getVerificationLink = ({ since, host }) =>
+  apiFetch(`/mail/verification-link${qs({ since: Math.floor(since), host })}`, { timeoutMs: 60_000 });
+
 /**
  * Before applying: { ok, reason, message, prior, inbox, inbox_syncing, checked_at }.
  * `wait: false` answers at once from the applications already synced and brings a

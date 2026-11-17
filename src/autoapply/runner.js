@@ -33,6 +33,12 @@ const jobId = params.get("job");
 // fill that tab where it is, and never submit.
 const refillTabId = params.get("tab") ? Number(params.get("tab")) : null;
 
+const READY_TO_SUBMIT = /^(oracle|adp|dayforce|icims)-submit$/;
+// Account sites whose engine opens the posting, creates or signs in to the candidate's account and fills every step
+// itself (Workday: Apply, Apply Manually, Create Account / Sign In, the inbox's verification link, then the steps).
+const ENGINE_HANDLES_ACCOUNT = new Set(["workday"]);
+const SOFT_NOTES = new Set(["oracle-resume-import"]);
+
 let submittedSignal = null;
 let ownTabId = null;
 let lastPlatform = null;
@@ -173,6 +179,8 @@ async function waitForFill() {
       step(af.runStatus);
     }
     if (af.runDone && !af.running) return af;
+    // The Workday loop ends with its own verdict (review, stuck, needs input...).
+    if (af.loopFinished && !af.running) return af;
     if (af.error && !af.discovering && !af.running) return af;
     await delay(500);
   }
@@ -191,8 +199,21 @@ async function fill(tab) {
     if (await jobGone(tab.id, 0)) throw postingGone();
     throw needsYou(af.error);
   }
-  const needs = (af.needsUser || []).map((n) => `${n.label}: ${n.reason}`);
-  return { filled: (af.specs || []).length, needs, submitted: af.submitted === true };
+  if (af.loopFinished) {
+    const loop = af.loopFinished;
+    if (loop === "submitted") return { filled: (af.reports || []).length, needs: [], submitted: true, readyToSubmit: false };
+    if (loop === "review" || loop === "done") return { filled: (af.reports || []).length, needs: [], submitted: false, readyToSubmit: true };
+    const extra = (af.needsUser || []).map((n) => `${n.label}: ${n.reason}`);
+    return { filled: (af.reports || []).length, needs: [af.loopMessage || "Workday stopped.", ...extra], submitted: false, readyToSubmit: false };
+  }
+  // Multi-step engines end with "every section is filled, review and click Submit": the application is ready, not
+  // stuck. An Oracle resume import that failed is not a blocker either: every section is still filled.
+  const all = af.needsUser || [];
+  const readyToSubmit = all.some((n) => READY_TO_SUBMIT.test(n.cid || ""));
+  const needs = all
+    .filter((n) => !READY_TO_SUBMIT.test(n.cid || "") && !SOFT_NOTES.has(n.cid || ""))
+    .map((n) => `${n.label}: ${n.reason}`);
+  return { filled: (af.specs || []).length, needs, submitted: af.submitted === true, readyToSubmit };
 }
 
 // ── submit, confirm, code ───────────────────────────────────────────────────
@@ -408,12 +429,15 @@ async function run(cfg) {
   if (onBoard(tab.url)) {
     throw needsYou("This is a job board listing. Open the employer's application from it.");
   }
-  if (NEEDS_ACCOUNT.has(platform)) throw needsYou(`${platform} needs an account. Sign in and finish the application.`);
+  if (NEEDS_ACCOUNT.has(platform) && !ENGINE_HANDLES_ACCOUNT.has(platform)) {
+    throw needsYou(`${platform} needs an account. Sign in and finish the application.`);
+  }
 
   job.engine = resolveEngine({ snapshot: job.snapshot, pageUrl: tab.url });
   // Engines that submit on their own (JobDiva) may only do so in live mode on sites allowed to submit.
   const maySubmit = !cfg.dryRun && cfg.submitPlatforms.includes(platform);
-  setState({ job, autoApplySubmit: maySubmit });
+  // Workday's loop drives every step only with auto-advance on.
+  setState({ job, autoApplySubmit: maySubmit, autoAdvance: true });
 
   step("Filling the application…");
   await recorder.snapshot(tab.id, "form");

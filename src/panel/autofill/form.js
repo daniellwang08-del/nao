@@ -83,6 +83,13 @@ const RECHECK_TIMES = 4;
  * before it. When the user already applied (to this job or at this company),
  * a notice asks whether to stop or keep filling; the fill is never held up.
  */
+
+function jobDivaPrepError(prep) {
+  return prep && prep.reason === "security-check"
+    ? "JobDiva is showing a security check. Complete it on the page, then start autofill again."
+    : "Could not open JobDiva Quick Apply on this page.";
+}
+
 export function checkAppliedAlongside(job = state.job, { retries = RECHECK_TIMES, recheckMs = RECHECK_MS } = {}) {
   if (!job || !job.job_id) return Promise.resolve(null);
   const jobId = job.job_id;
@@ -234,9 +241,9 @@ export async function startAutofill({ tab: targetTab = null, headless = false, r
           setAutofill({
             discovering: false,
             runStatus: null,
-            error: "Could not open JobDiva Quick Apply on this page.",
+            error: jobDivaPrepError(prep),
           });
-          return { ok: false, error: "Could not open JobDiva Quick Apply on this page." };
+          return { ok: false, error: jobDivaPrepError(prep) };
         }
       }
       // Generic custom career pages: accept privacy/terms overlays before scan so
@@ -1411,7 +1418,7 @@ async function runAutofillPass() {
         setAutofill({
           running: false,
           runStatus: null,
-          error: "Could not open JobDiva Quick Apply on this page.",
+          error: jobDivaPrepError(prep),
         });
         return;
       }

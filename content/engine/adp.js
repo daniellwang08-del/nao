@@ -7,7 +7,7 @@
 //             select[name=phoneCountry] + input#login_view_phone, prefilled "+1"); Continue =
 //             sdf-button#recruitment_login_recaptcha (runs Google reCAPTCHA in the candidate's browser)
 //   otp       "Get your verification code": a radio per masked identifier (mobile, email) + "Send"
-//             (#recruitment_login_sendOtp); then "Enter the Verification Code": one input + "Verify"
+//             (#recruitment_login_sendOtp, now #recruitment_login_guestLogin; options are wfn-radio-button components); then "Enter the Verification Code": one input + "Verify"
 //             (#recruitment_login_verifyOTP), "Resend Code" (#recruitment_login_resendOTP)
 //   wizard    "Applying for <title>": Personal Information -> Resume -> Questions (1..n) -> Voluntary Self-ID ->
 //             Review Your Application -> Self-Attest & Submit, each with "Next"
@@ -254,15 +254,26 @@
   async function sendCodeByEmail(email) {
     const d = otpMethodDialog();
     if (!d) return { ok: false, error: "No verification-code choice on the page." };
-    const radios = [...d.querySelectorAll("input[type=radio]")];
+    // The choices are SDF web components (wfn-radio-button > shadow sdf-radio-button[role=radio]) on current pages,
+    // plain radio inputs on older ones. The identifier (possibly masked) is the option's text.
+    const opts = [...d.querySelectorAll("wfn-radio-button, sdf-radio-button, [role=radio], input[type=radio]")];
     const want = clean(email).toLowerCase();
+    const txt = (o) => (textOf((o.closest && o.closest("label")) || o) + " " + textOf(o.parentElement || o) + " " + (o.value || "")).toLowerCase();
     const pick =
-      radios.find((r) => textOf(r.closest("label") || r.parentElement).toLowerCase().includes(want)) ||
-      radios.find((r) => /@/.test(textOf(r.closest("label") || r.parentElement) + " " + (r.value || "")));
+      d.querySelector("#emailIdentifierId") ||
+      opts.find((o) => txt(o).includes(want)) ||
+      opts.find((o) => /@/.test(txt(o)) || /email/i.test(o.id || ""));
     if (!pick) return { ok: false, error: "No email option to receive the code." };
-    if (!pick.checked) pick.click();
-    await waitUntil(() => pick.checked, 2000, 80);
-    const send = document.getElementById("recruitment_login_sendOtp") || [...d.querySelectorAll("button, sdf-button, [role=button]")].find((b) => /^send$/i.test(labelOf(b)));
+    const radio = (pick.shadowRoot && pick.shadowRoot.querySelector("[role=radio], sdf-radio-button, input[type=radio]")) || pick;
+    const isOn = () =>
+      radio.checked === true || pick.checked === true || radio.getAttribute("aria-checked") === "true" || pick.getAttribute("aria-checked") === "true" || pick.hasAttribute("checked");
+    if (!isOn()) radio.click();
+    if (!(await waitUntil(isOn, 1500, 80)) && radio !== pick) pick.click();
+    await waitUntil(isOn, 1500, 80); // unconfirmed is fine: Send and the next stage decide
+    const send =
+      document.getElementById("recruitment_login_sendOtp") ||
+      document.getElementById("recruitment_login_guestLogin") ||
+      [...d.querySelectorAll("button, sdf-button, [role=button]")].find((b) => /^send$/i.test(labelOf(b)));
     if (!send) return { ok: false, error: "No Send button." };
     const before = stage().key;
     send.click();

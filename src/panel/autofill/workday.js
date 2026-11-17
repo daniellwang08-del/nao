@@ -381,7 +381,7 @@ async function handleWorkdayResolve(msg) {
 // step reloads the page, so this loop re-injects and asks the page for one
 // action at a time. One generated password serves every Workday tenant, so the
 // candidate can sign in anywhere with the same login.
-const WD_GATE_ROUNDS = 8;
+const WD_GATE_ROUNDS = 10;
 const WD_CREDENTIAL_HOST = "myworkdayjobs.com";
 
 async function workdayCredentials(email) {
@@ -424,11 +424,39 @@ async function passWorkdayGate(tabId, engine, profile) {
   return false;
 }
 
+const WD_LINK_WAIT_MS = 180_000;
+
+/** Poll the connected inbox for Workday's activation link to this tab's host. Returns { url } or { message }. */
+async function waitVerificationLink(tabId, since, stopped) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  let host = "";
+  try {
+    host = new URL((tab && tab.url) || "").hostname;
+  } catch {
+    /* no host */
+  }
+  const manual = "Workday sent a verification email. Open the link in it, sign in on this page, then press Fill again.";
+  if (!host) return { message: manual };
+  const until = Date.now() + WD_LINK_WAIT_MS;
+  while (Date.now() < until && !stopped()) {
+    const res = await api.getVerificationLink({ since, host }).catch(() => null);
+    if (res && res.connected === false) {
+      return { message: `${manual} (Connect your inbox in NAO and it will do this for you.)` };
+    }
+    if (res && res.link) return { url: res.link };
+    await delay(8000);
+  }
+  return { message: `No verification email from Workday arrived in 3 minutes. ${manual}` };
+}
+
 /** Click through to the application form. Returns { ok } or { ok: false, message }. */
 export async function reachWorkdayForm(tabId, engine, email) {
   const stopped = () => !state.autofill.active || state.autofill.loopStop;
   let creds = null;
   let last = "";
+  let verified = false;
+  // The verification email can only be newer than the account: before NAO made it, look back ten minutes.
+  let accountAt = Date.now() / 1000 - 600;
   for (let round = 0; round < WD_GATE_ROUNDS; round++) {
     if (stopped()) return { ok: false, stopped: true };
     await waitTabSettled(tabId);
@@ -444,16 +472,27 @@ export async function reachWorkdayForm(tabId, engine, email) {
     }
     if (!page || page === "form") return { ok: true };
     if (page === "verifyEmail") {
-      return {
-        ok: false,
-        message: "Workday sent a verification email. Open the link in it, sign in on this page, then press Fill again.",
-      };
+      if (verified) {
+        return { ok: false, message: "Workday still asks to verify the email after its link was opened. Sign in on this page, then press Fill again." };
+      }
+      // Workday emailed an activation link: take it from the connected inbox, open it, then sign in.
+      setAutofill({ loopStatus: "Waiting for Workday's verification email…" });
+      const link = await waitVerificationLink(tabId, accountAt, stopped);
+      if (stopped()) return { ok: false, stopped: true };
+      if (!link.url) return { ok: false, message: link.message };
+      verified = true;
+      setAutofill({ loopStatus: "Verifying your Workday account…" });
+      await chrome.tabs.update(tabId, { url: link.url }).catch(() => null);
+      await delay(3000);
+      last = "";
+      continue;
     }
     if ((page === "createAccount" || page === "signIn") && !(res && res.acted)) {
       if (!creds) {
         if (!email) return { ok: false, message: "Your profile has no email, so NAO cannot create the Workday account. Sign in yourself, then press Fill again." };
         setAutofill({ loopStatus: "Creating your Workday account…" });
         creds = await workdayCredentials(email);
+        accountAt = Date.now() / 1000;
         setAutofill({ account: { login: creds.email, password: creds.password } });
         continue;
       }

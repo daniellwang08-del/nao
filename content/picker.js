@@ -1317,7 +1317,10 @@
       setVal(q);
       const opt = await srWait(
         () => {
-          const opts = srDeepQuery(scope, '[role="option"]:not([aria-disabled="true"])');
+          // Never the "enter it manually" fallback: it swaps the search for separate manual fields.
+          const opts = srDeepQuery(scope, '[role="option"]:not([aria-disabled="true"])').filter(
+            (o) => !/manual|can.?t find|enter .*(location|address)|not listed/i.test(clean(o.innerText || o.textContent || ""))
+          );
           return opts.length ? opts[0] : null;
         },
         2500,
@@ -1358,9 +1361,35 @@
   // "Postal code" search. Both the postal field and the country picker are
   // geocoded autocompletes (no custom values), so we type and pick the top
   // suggestion. In postal mode we type the candidate's ZIP (not address text).
+  // Manual location mode (after "enter manually"): a Country/Region picker plus a free-text City.
+  async function srFillManualLocation(host, parts) {
+    const countryHost = srDeepOne(host, '[data-test="manual-location-country"]');
+    if (!countryHost) return null;
+    const countryInput = srDeepOne(countryHost, "input");
+    // "Austin, TX" carries no country: a two-letter state code is a US state.
+    const country = parts.country || (/^[A-Z]{2}$/.test(parts.state) ? "United States" : "");
+    if (countryInput && country && !clean(countryInput.value)) await srTypePick(countryInput, srCountryQueries(country));
+    const cityHost = srDeepOne(host, '[data-test="manual-location-city"]');
+    const cityInput = cityHost && srDeepOne(cityHost, "input");
+    if (cityInput && parts.city && !clean(cityInput.value)) {
+      const setText = AF.native && AF.native.setTextInput;
+      if (setText) setText(cityInput, parts.city);
+      else {
+        if (dom.setNativeValue) dom.setNativeValue(cityInput, parts.city);
+        else cityInput.value = parts.city;
+        cityInput.dispatchEvent(new Event("input", { bubbles: true }));
+        cityInput.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    }
+    await srDelay(200);
+    return !!(countryInput && clean(countryInput.value)) && !!(!cityInput || clean(cityInput.value));
+  }
+
   async function srFillLocation(host, loc) {
     if (!host) return false;
     const parts = srLocParts(loc);
+    const manual = await srFillManualLocation(host, parts);
+    if (manual !== null) return manual;
     const inputs = srDeepQuery(
       host,
       'input[role="combobox"], input[aria-autocomplete], input.c-spl-input'
@@ -1385,7 +1414,10 @@
     }
     // City-search mode.
     const target = cityInput || inputs[0];
-    return await srTypePick(target, srLocQueries(loc));
+    const picked = await srTypePick(target, srLocQueries(loc));
+    await srDelay(300);
+    const after = await srFillManualLocation(host, parts);
+    return after !== null ? after : picked;
   }
 
   // Fill a multi-line spl-textarea (Experience / Education Description) inside an

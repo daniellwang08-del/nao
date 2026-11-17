@@ -31,7 +31,7 @@ export const GONE_TEXT =
   "(page|job|position) (could not|couldn'?t|cannot|can'?t) be found|(page|job|position|posting) not found|" +
   "couldn'?t find (anything|the page|that page|the job|this job|that job)|(page|job|position|posting) (doesn'?t|does not) exist|" +
   "applications? (are |is )?(now )?closed|not accepting (applications|candidates)|^404\\b|\\b404 (error|not found)|error 404|" +
-  "you'?ve gone too far|(hiring|recruiting|position|job|posting|requisition)( for this (job|position|role))? (has been put|is( currently)?) on hold";
+  "you'?ve gone too far|(job|position|posting|role)s? (you('re| are) looking for )?may have (closed|expired|been (filled|removed|closed))|(hiring|recruiting|position|job|posting|requisition)( for this (job|position|role))? (has been put|is( currently)?) on hold";
 // Where job boards send a dead posting: Greenhouse back to the board with
 // ?error=true, Workable to the company page with ?not_found=true.
 export const GONE_URL = "[?&](error|not_found)=true\\b|/(404|not-found|job-not-found)(/|$|\\?)";
@@ -231,6 +231,18 @@ export function probeApplyPage(rules, act) {
     if (upload || contact) ready = true;
   }
   if (ready) account = false;
+  // A sign-in wall offering only "Sign in with Microsoft / Google / LinkedIn" buttons has no password box.
+  if (!ready && !account) {
+    try {
+      const oauthRe = /^(sign[- ]?in|log[- ]?in|continue|sign[- ]?up|apply) (with|using|via) (microsoft|google|linkedin|facebook|apple|indeed)/;
+      const providers = deepAll("a, button, [role=button]").filter(
+        (el) => visible(el) && (oauthRe.test(text(el)) || /provider-signin|social-login|oauth/i.test(String(el.className || "")))
+      );
+      if (providers.length >= 2) account = true;
+    } catch {
+      /* ignore */
+    }
+  }
   // iCIMS opens every application with "Enter Your Information" (email, then Next). It is a step of the
   // application, not an account wall: the iCIMS engine passes it.
   let gate = null;
@@ -240,6 +252,15 @@ export function probeApplyPage(rules, act) {
     /* no getElementById (tests) */
   }
   if (gate) account = false;
+  // Jobvite asks for a data-privacy acknowledgement (residence/language policy, then Accept) before its form.
+  let consent = null;
+  try {
+    const sel = !ready && document.getElementById("jv-country-select");
+    if (sel && visible(sel)) consent = "jobvite";
+  } catch {
+    /* tests */
+  }
+  if (consent) account = false;
 
   // Only a page without a form can be a dead posting. Headings and alerts are
   // read in full; body text only on a sparse page, where a description
@@ -256,12 +277,34 @@ export function probeApplyPage(rules, act) {
     }
     if (!gone) {
       const body = norm(document.body && document.body.innerText);
-      gone = body.length > 0 && body.length < 1500 && goneRe.test(body);
+      // A status banner sits above the description, so the top of a long page counts too.
+      gone = body.length > 0 && (body.length < 1500 ? goneRe.test(body) : goneRe.test(body.slice(0, 600)));
     }
   }
   const base = account ? { ready, fields, gone, account } : { ready, fields, gone };
   if (gate) base.gate = gate;
-  if (ready || gone || gate || !act) return base;
+  if (consent) base.consent = consent;
+  if (ready || gone || gate || consent || !act) return base;
+
+  // Lazy Turbo frames (Teamtailor's application form) wait for an IntersectionObserver that never fires in a
+  // background tab: load them now.
+  try {
+    for (const f of Array.from(document.querySelectorAll('turbo-frame[loading="lazy"][src]:not([complete])'))) f.setAttribute("loading", "eager");
+  } catch {
+    /* ignore */
+  }
+  // An embedded Greenhouse board: open its frame full-page, where the form loads without the host page's scripts.
+  if (act !== "peek") {
+    try {
+      const gh = document.querySelector("iframe#grnhse_iframe");
+      const src = gh && (gh.getAttribute("src") || gh.getAttribute("nitro-lazy-src") || gh.getAttribute("data-src"));
+      if (src && /^https:/i.test(src) && typeof window !== "undefined" && window.top === window) {
+        return { ready: false, fields, label: "Application form", href: new URL(src, location.href).href };
+      }
+    } catch {
+      /* ignore */
+    }
+  }
 
   const applyText = new RegExp(rules.applyText);
   const notApply = new RegExp(rules.notApplyText);
@@ -269,8 +312,11 @@ export function probeApplyPage(rules, act) {
   const candidates = deepAll("a, button, [role=button], input[type=button], input[type=submit]")
     .filter((el) => visible(el) && !el.disabled && attr(el, "aria-disabled") !== "true")
     .map((el) => {
-      const t = text(el);
-      const attrs = [el.id, el.className && String(el.className), attr(el, "data-ui"), attr(el, "data-testid"), attr(el, "data-qa")]
+      // A button inside a web component's shadow root shows the host's slotted text (UKG <ukg-button>).
+      const root = el.getRootNode ? el.getRootNode() : null;
+      const host = root && root.host ? root.host : null;
+      const t = text(el) || (host ? text(host) : "");
+      const attrs = [el.id, el.className && String(el.className), attr(el, "data-ui"), attr(el, "data-testid"), attr(el, "data-qa"), host && String(host.className || "")]
         .filter(Boolean)
         .join(" ")
         .toLowerCase();
@@ -299,6 +345,16 @@ export function probeApplyPage(rules, act) {
   } catch {
     /* ignore */
   }
+  // Tab-style triggers (Radix on Recruitee) switch on mousedown, not click: press like a pointer first.
+  try {
+    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup"]) {
+      const Ev = type.startsWith("pointer") && typeof PointerEvent === "function" ? PointerEvent : MouseEvent;
+      hit.el.dispatchEvent(new Ev(type, { bubbles: true, cancelable: true, button: 0, view: window }));
+    }
+    if (attr(hit.el, "role") === "tab" && hit.el.focus) hit.el.focus();
+  } catch {
+    /* no event constructors (tests) */
+  }
   hit.el.click();
   return { ready: false, fields, label: hit.t, clicked: true };
 }
@@ -307,6 +363,40 @@ const RULES = { applyText: APPLY_TEXT, notApplyText: NOT_APPLY_TEXT, applyAttr: 
 // The rules probeApplyPage is called with (tests and tooling run it directly).
 export const PROBE_RULES = RULES;
 const HOPS = 3;
+
+/**
+ * Jobvite's Data Consent step (runs in the page): choose the residence/language policy - the United States one when
+ * listed, else Global, else the only one - then Accept. Returns { clicked, label } or { error }.
+ */
+export async function passJobviteConsent() {
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const sel = document.getElementById("jv-country-select");
+  if (!sel) return { error: "no consent select" };
+  const opts = Array.from(sel.options).filter((o) => o.value);
+  if (!opts.length) return { error: "no consent policies" };
+  const label = (o) => String(o.textContent || "").toLowerCase();
+  const pick = opts.find((o) => /united states|\busa?\b|english \(us\)/.test(label(o))) || opts.find((o) => /global/.test(label(o))) || (opts.length === 1 ? opts[0] : null);
+  if (!pick) return { error: "no policy for the United States or Global" };
+  if (sel.value !== pick.value) {
+    sel.value = pick.value;
+    sel.dispatchEvent(new Event("input", { bubbles: true }));
+    sel.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+  const form = sel.closest("form") || document;
+  for (let i = 0; i < 20; i++) {
+    await wait(500);
+    const accept = Array.from(form.querySelectorAll("button, a, input[type=button], input[type=submit]")).find((b) => {
+      const t = String(b.innerText || b.value || "").trim().toLowerCase();
+      const r = b.getBoundingClientRect();
+      return /^(i )?(accept|agree)\b/.test(t) && r.width > 0 && r.height > 0 && !b.disabled;
+    });
+    if (accept) {
+      accept.click();
+      return { clicked: true, label: "Accept data consent" };
+    }
+  }
+  return { error: "the Accept button did not appear" };
+}
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -382,6 +472,7 @@ const RENDER_WAIT_MS = 8000;
 export async function reachApplicationForm(tabId, { onStep = () => {}, waitMs = 15_000, focus = null } = {}) {
   const steps = [];
   let account = false;
+  let consents = 0;
   for (let hop = 0; hop <= HOPS; hop++) {
     const frames = await probe(tabId, false);
     account = frames.some((f) => f.account);
@@ -389,6 +480,23 @@ export async function reachApplicationForm(tabId, { onStep = () => {}, waitMs = 
     if (frames.some((f) => f.gone)) return { ready: false, gone: true, steps, tab: await chrome.tabs.get(tabId).catch(() => null) };
     const gated = frames.find((f) => f.gate);
     if (gated) return { ready: false, gone: false, gate: gated.gate, steps, tab: await chrome.tabs.get(tabId).catch(() => null) };
+    if (frames.some((f) => f.consent === "jobvite") && consents < 2) {
+      consents++;
+      hop--; // the consent step is part of the application, not an Apply hop
+      onStep("Accepting the data consent…");
+      let res = null;
+      try {
+        const out = await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: passJobviteConsent });
+        res = (out || []).map((r) => r && r.result).find((r) => r && (r.clicked || r.error)) || null;
+      } catch {
+        res = null;
+      }
+      if (!res || !res.clicked) break;
+      steps.push(res.label);
+      await sleep(1500);
+      await settled(tabId, 30_000);
+      continue;
+    }
     if (hop === HOPS) break;
 
     const opened = [];
@@ -454,7 +562,7 @@ export async function reachApplicationForm(tabId, { onStep = () => {}, waitMs = 
       if (!tab) return { ready: false, gone: false, steps, tab: null };
       if (tab.status !== "complete") continue;
       const now = await probe(tabId, false);
-      if (now.some((f) => f.ready || f.gone || f.account || f.gate)) break;
+      if (now.some((f) => f.ready || f.gone || f.account || f.gate || f.consent)) break;
     }
   }
   const tab = await chrome.tabs.get(tabId).catch(() => null);

@@ -258,7 +258,15 @@
   }
 
   // Idempotent: open My Application via Apply Now → Quick Apply (No Account).
+  // A bot check covering the page (Cloudflare Turnstile): NAO never passes these; the person does.
+  function hasSecurityCheck() {
+    return !!document.querySelector(
+      '[role=dialog][aria-label="Security check" i], input[name="cf-turnstile-response"], iframe[src*="challenges.cloudflare.com"]'
+    );
+  }
+
   async function openQuickApply() {
+    if (hasSecurityCheck() && !hasApplicationForm()) return { ready: false, reason: "security-check" };
     if (!isJobDivaPage() && !hasApplyNow() && !hasApplicationForm()) {
       return { ready: false, reason: "not-jobdiva" };
     }
@@ -275,7 +283,7 @@
       }
       const opened = await waitFor(() => hasMethodModal() || hasApplicationForm(), 8000);
       if (!opened && !hasApplicationForm()) {
-        return { ready: false, reason: "no-method-modal" };
+        return { ready: false, reason: hasSecurityCheck() ? "security-check" : "no-method-modal" };
       }
     }
 

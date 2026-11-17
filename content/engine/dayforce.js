@@ -317,10 +317,10 @@
     if (!isDayforcePage() || !el) return false;
     const id = el.id || "";
     if (id === "lang-select" || /recaptcha/i.test(id + " " + (el.name || ""))) return true;
-    if (el.disabled || (el.closest && el.closest(".ant-select-disabled, .ant-input-disabled"))) {
-      // State/Province is disabled only until a country is chosen; it is filled on a later pass.
-      return !(el.closest && el.closest(".ant-select-disabled") && /stateCode$/.test(id));
-    }
+    // Disabled controls are not ours now. State/Province is disabled only until a country is chosen: leaving it
+    // out here lets the next pass see it enabled, with its options (sent now it has none, comes back skipped and
+    // counts as attempted, so no later pass would retry it).
+    if (el.disabled || (el.closest && el.closest(".ant-select-disabled, .ant-input-disabled"))) return true;
     if (/files_resume$|files_additionalDocument$/.test(id)) return true; // imported first / not ours
     if (/workHoursAvailability_/.test(id) && !/_comment$/.test(id)) return true; // prepareWorkHours
     if (el.closest && el.closest(".ant-space-compact") && el.closest(".ant-select")) return true; // dialing codes

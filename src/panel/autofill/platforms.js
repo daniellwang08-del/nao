@@ -828,6 +828,9 @@ export async function prepareAdp(tabId, eng, ctx) {
   }
   st = await adpStage(tabId);
   if (st && (st.kind === "wizard" || st.kind === "attest")) return { stage: st };
+  // Say what ADP itself objects to ("Invalid Mobile Number."), not just that it did not move on.
+  const errs = ((st && st.errors) || []).filter(Boolean).slice(0, 3);
+  if (errs.length) return { blocked: `ADP did not accept the details: ${errs.join("; ")} Fix it on the page (or in your NAO profile), then start autofill again.` };
   return { blocked: "ADP did not open the application. Finish the step on the page, then start autofill again." };
 }
 
@@ -988,7 +991,7 @@ export async function importOracleResume(tabId, st, ctx) {
   const r = await tabSend(tabId, { type: "AF_ORC_IMPORT", file: { name: file.filename, type: file.mime, b64: file.base64 }, timeoutMs: 90000 }, 0);
   debugLog("[autofill] Oracle resume import:", r);
   if (!r || !r.ok) {
-    ctx.needsUser.push({ cid: "oracle-resume", label: "Resume import", reason: (r && r.error) || "The resume import did not finish. Your details are still filled from your profile." });
+    ctx.needsUser.push({ cid: "oracle-resume-import", label: "Resume import", reason: (r && r.error) || "The resume import did not finish. Your details are still filled from your profile." });
   }
   return r || { ok: false };
 }
