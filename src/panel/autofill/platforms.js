@@ -819,6 +819,7 @@ export async function prepareAdp(tabId, eng, ctx) {
       sentAt = Date.now();
       const r = await tabSend(tabId, { type: "AF_ADP_SEND_CODE", email: contact.email || "" }, 0);
       if (!r || !r.ok) return { blocked: (r && r.error) || "Choose your email on the page and click Send, then start autofill again." };
+      if (r.sentAt) sentAt = r.sentAt; // the moment Send was clicked, from the page
     } else if (st.kind === "otp-code") {
       const res = await enterAdpCode(tabId, company, sentAt || Date.now() - 120_000);
       if (res.blocked) return res;
@@ -835,15 +836,19 @@ export async function prepareAdp(tabId, eng, ctx) {
 }
 
 // The code ADP emailed, from the connected inbox; the candidate types it when the inbox is not connected.
+// ADP's code email never names the employer, so parallel ADP applications are told apart by time: each one
+// registers its Send click (claim = job + Send time) and the server hands out ADP's emails first-come-first-served,
+// each to the first application still waiting that clicked Send before the email arrived.
 async function enterAdpCode(tabId, company, sentAtMs) {
   const since = Math.floor(sentAtMs / 1000) - 5; // only mail sent after Send
+  const claim = `${(state.job && state.job.job_id) || "job"}:${Math.round(sentAtMs)}`;
   const tried = [];
   const started = Date.now();
   setAutofill({ runStatus: "Waiting for the verification code in your email…" });
   while (Date.now() - started < ADP_CODE_WAIT_MS) {
     let res = null;
     try {
-      res = await api.getVerificationCode({ since, sender: "adp.com", exclude: tried }); // ADP's code email never names the employer
+      res = await api.getVerificationCode({ since, sender: "adp.com", claim, sentAt: sentAtMs / 1000, exclude: tried });
     } catch {
       res = null;
     }
