@@ -13,7 +13,7 @@ import * as storage from "../storage.js";
 import { detectPlatform, resolveEngine } from "../engines.js";
 import { docsComplete, jobFromSession } from "../panel/actions/job.js";
 import { handleAutofillMessage, startAutofill } from "../panel/autofill/index.js";
-import { setFocusGate } from "../panel/autofill/shared.js";
+import { getAutofillProfile, setFocusGate } from "../panel/autofill/shared.js";
 import { emptyAutofill, setState, state } from "../panel/state.js";
 import { AGGREGATOR_HOSTS, NEEDS_ACCOUNT, applyPageUrl, hostOf } from "./platforms.js";
 import { createRecorder } from "./recorder.js";
@@ -411,10 +411,13 @@ async function run(cfg) {
       onStep: step,
       waitMs: 25_000,
       focus: wakeTab,
+      // Consent steps that ask for the place of residence (Jobvite) choose from the profile address.
+      residence: () => getAutofillProfile(job.job_id).then((p) => p && p.address),
     });
     if (!reached.tab) throw new Stop("failed", "The application tab was closed.");
     tab = reached.tab;
     if (reached.gone) throw postingGone();
+    if (reached.consentError) throw needsYou(reached.consentError);
     if (!reached.ready && reached.account) throw needsYou(NEEDS_ACCOUNT_MESSAGE);
     if (!reached.ready && reached.steps.length) {
       throw needsYou(`Clicked "${reached.steps[reached.steps.length - 1]}" but no application form opened. Open it on the page.`);

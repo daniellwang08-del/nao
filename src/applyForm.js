@@ -368,16 +368,25 @@ const HOPS = 3;
  * Jobvite's Data Consent step (runs in the page): choose the residence/language policy - the United States one when
  * listed, else Global, else the only one - then Accept. Returns { clicked, label } or { error }.
  */
-export async function passJobviteConsent() {
+export async function passJobviteConsent(residence = "") {
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   const sel = document.getElementById("jv-country-select");
   if (!sel) return { error: "no consent select" };
-  const opts = Array.from(sel.options).filter((o) => o.value);
+  const L = (o) => String(o.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+  const opts = Array.from(sel.options).filter((o) => o.value && !/^\?/.test(o.value) && !/^select\b/.test(L(o)));
   if (!opts.length) return { error: "no consent policies" };
-  const label = (o) => String(o.textContent || "").toLowerCase();
-  const pick = opts.find((o) => /united states|\busa?\b|english \(us\)/.test(label(o))) || opts.find((o) => /global/.test(label(o))) || (opts.length === 1 ? opts[0] : null);
-  if (!pick) return { error: "no policy for the United States or Global" };
+  // Residence words ("california, ca, united states"), matched as whole words so "Non-California" never matches.
+  const r = ` ${String(residence || "").toLowerCase().replace(/[^a-z]+/g, " ").trim()} `;
+  const us = /\b(united states|usa?)\b/.test(r); // unknown residence never picks a state-specific policy
+  const pick =
+    (r.trim() && opts.find((o) => L(o).length > 2 && !/^non[- ]/.test(L(o)) && r.includes(` ${L(o).replace(/[^a-z]+/g, " ").trim()} `))) ||
+    opts.find((o) => /united states|\busa?\b|english \(us\)/.test(L(o))) ||
+    (us && opts.find((o) => /^non[- ]?california\b/.test(L(o))) && !/\bcalifornia\b/.test(r) ? opts.find((o) => /^non[- ]?california\b/.test(L(o))) : null) ||
+    opts.find((o) => /global|^other\b|all other|rest of (the )?world|international/.test(L(o))) ||
+    (opts.length === 1 ? opts[0] : null);
+  if (!pick) return { error: `no consent policy fits (${opts.map(L).join(", ")})` };
   if (sel.value !== pick.value) {
+    pick.selected = true;
     sel.value = pick.value;
     sel.dispatchEvent(new Event("input", { bubbles: true }));
     sel.dispatchEvent(new Event("change", { bubbles: true }));
@@ -396,6 +405,31 @@ export async function passJobviteConsent() {
     }
   }
   return { error: "the Accept button did not appear" };
+}
+
+const US_STATE_NAMES = {
+  al: "alabama", ak: "alaska", az: "arizona", ar: "arkansas", ca: "california", co: "colorado", ct: "connecticut", de: "delaware",
+  dc: "district of columbia", fl: "florida", ga: "georgia", hi: "hawaii", id: "idaho", il: "illinois", in: "indiana", ia: "iowa",
+  ks: "kansas", ky: "kentucky", la: "louisiana", me: "maine", md: "maryland", ma: "massachusetts", mi: "michigan", mn: "minnesota",
+  ms: "mississippi", mo: "missouri", mt: "montana", ne: "nebraska", nv: "nevada", nh: "new hampshire", nj: "new jersey",
+  nm: "new mexico", ny: "new york", nc: "north carolina", nd: "north dakota", oh: "ohio", ok: "oklahoma", or: "oregon",
+  pa: "pennsylvania", ri: "rhode island", sc: "south carolina", sd: "south dakota", tn: "tennessee", tx: "texas", ut: "utah",
+  vt: "vermont", va: "virginia", wa: "washington", wv: "west virginia", wi: "wisconsin", wy: "wyoming",
+};
+
+/** "california, ca, united states" from a profile address (or a function resolving to one). */
+async function residenceText(source) {
+  let addr = source;
+  try {
+    if (typeof source === "function") addr = await source();
+  } catch {
+    addr = null;
+  }
+  if (!addr) return "";
+  if (typeof addr === "string") return addr;
+  const st = String(addr.state || "").trim();
+  const full = US_STATE_NAMES[st.toLowerCase()] || "";
+  return [full, st, addr.country || (full ? "united states" : "")].filter(Boolean).join(", ");
 }
 
 function sleep(ms) {
@@ -469,7 +503,8 @@ const RENDER_WAIT_MS = 8000;
  * the posting itself is expired or removed, `account` that the page asks to
  * sign in or create an account instead of showing an application.
  */
-export async function reachApplicationForm(tabId, { onStep = () => {}, waitMs = 15_000, focus = null } = {}) {
+export async function reachApplicationForm(tabId, opts = {}) {
+  const { onStep = () => {}, waitMs = 15_000, focus = null } = opts;
   const steps = [];
   let account = false;
   let consents = 0;
@@ -486,12 +521,16 @@ export async function reachApplicationForm(tabId, { onStep = () => {}, waitMs = 
       onStep("Accepting the data consent…");
       let res = null;
       try {
-        const out = await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: passJobviteConsent });
+        const residence = await residenceText(opts.residence);
+        const out = await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: passJobviteConsent, args: [residence] });
         res = (out || []).map((r) => r && r.result).find((r) => r && (r.clicked || r.error)) || null;
       } catch {
         res = null;
       }
-      if (!res || !res.clicked) break;
+      if (!res || !res.clicked) {
+        const why = (res && res.error) || "the consent step could not be completed";
+        return { ready: false, gone: false, consentError: `Jobvite's Data Consent step: ${why}. Choose your residence and click Accept on the page.`, steps, tab: await chrome.tabs.get(tabId).catch(() => null) };
+      }
       steps.push(res.label);
       await sleep(1500);
       await settled(tabId, 30_000);

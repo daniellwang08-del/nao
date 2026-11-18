@@ -541,10 +541,35 @@
   // One action on the current pre-application page. Returns { page, acted,
   // error }; acted names what was clicked so the panel can tell a stuck page
   // (same page, same action, twice) from progress.
-  async function gateStep(creds) {
+  // The header shows the account menu once the candidate is signed in (the form below can lag behind).
+  function signedIn() {
+    return !!(visibleAid("utilityButtonAccountTasksMenu") || document.getElementById("accountSettingsButton"));
+  }
+
+  // After Create Account / Sign In: wait for Workday to move on (a single-page app: no page load to wait for).
+  async function awaitGateResult(page) {
+    for (const end = Date.now() + 15000; Date.now() < end; ) {
+      await D.delay(500);
+      if (signedIn() || gatePage() !== page) return "";
+      const e = gateErrorText();
+      if (e) return e;
+    }
+    return "";
+  }
+
+  async function gateStep(creds, opts = {}) {
     const page = gatePage();
     const error = gateErrorText();
-    const out = { page, error, acted: null };
+    const out = { page, error, acted: null, signedIn: signedIn() };
+    if ((page === "createAccount" || page === "signIn") && out.signedIn) {
+      out.acted = "pending"; // signed in already; the application is still loading
+      return out;
+    }
+    if (page === "createAccount" && opts.toSignIn && visibleAid("signInLink")) {
+      D.clickEl(visibleAid("signInLink"));
+      out.acted = "toSignIn";
+      return out;
+    }
     if (page === "posting") {
       D.clickEl(visibleAid("adventureButton"));
       out.acted = "apply";
@@ -564,6 +589,7 @@
         if (box && !box.checked) D.clickEl(box);
         await D.delay(300);
         out.acted = pressSubmit("createAccountSubmitButton") ? "create" : null;
+        if (out.acted) out.error = (await awaitGateResult("createAccount")) || out.error;
       }
     } else if (page === "signIn") {
       if (creds && creds.email && creds.password) {
@@ -571,8 +597,10 @@
         typeInto(visibleAid("password"), creds.password);
         await D.delay(300);
         out.acted = pressSubmit("signInSubmitButton") ? "signIn" : null;
+        if (out.acted) out.error = (await awaitGateResult("signIn")) || out.error;
       }
     }
+    out.signedIn = signedIn();
     try {
       if (WD.aa) WD.aa("gateStep", { page, acted: out.acted, error: error.slice(0, 120) });
     } catch {}

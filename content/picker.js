@@ -1301,6 +1301,13 @@
   // from ITS OWN listbox. The options popup is scoped to the input's enclosing
   // spl-autocomplete so that, when a block has two pickers (Country/Region +
   // Postal code), we never cross-pick the wrong one. Returns true once committed.
+  // An option's visible text lives in its host's light DOM (spl-select-option > shadow spl-dropdown-item > shadow
+  // div[role=option] holding only slots).
+  function srOptText(o) {
+    const host = srClosestHost(o, "spl-select-option") || srClosestHost(o, "spl-dropdown-item") || o;
+    return clean((host.getAttribute && host.getAttribute("title")) || host.textContent || o.innerText || o.textContent || "");
+  }
+
   async function srTypePick(input, queries) {
     if (!input) return false;
     const scope =
@@ -1319,7 +1326,7 @@
         () => {
           // Never the "enter it manually" fallback: it swaps the search for separate manual fields.
           const opts = srDeepQuery(scope, '[role="option"]:not([aria-disabled="true"])').filter(
-            (o) => !/manual|can.?t find|enter .*(location|address)|not listed/i.test(clean(o.innerText || o.textContent || ""))
+            (o) => !/manual|can.?t find|enter .*(location|address)|not listed/i.test(srOptText(o))
           );
           return opts.length ? opts[0] : null;
         },
@@ -1415,7 +1422,8 @@
     // City-search mode.
     const target = cityInput || inputs[0];
     const picked = await srTypePick(target, srLocQueries(loc));
-    await srDelay(300);
+    // Manual mode renders a moment after a pick switches to it.
+    await srWait(() => srDeepOne(host, '[data-test="manual-location-country"]') || (clean(target.value) && target.getAttribute("aria-expanded") !== "true"), 2500, 100);
     const after = await srFillManualLocation(host, parts);
     return after !== null ? after : picked;
   }

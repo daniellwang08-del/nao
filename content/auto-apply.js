@@ -206,6 +206,23 @@
   }
 
   // Required fields still empty; submitting would only bounce back.
+  // A custom select (react-select, Paylocity) shows its choice in a value element beside the search box: walk up
+  // the widget (never past it into a neighbour) and read it. A placeholder ("Select a state") is no value.
+  const COMBO_VALUE_SEL = "[class*='single-value'], [class*='singleValue'], [class*='multi-value'], [class*='multiValue']";
+  const COMBO_PLACEHOLDER = /^(select|choose|please select|--)/i;
+  function comboHasValue(el) {
+    let node = el.parentElement;
+    for (let i = 0; node && i < 6; i++, node = node.parentElement) {
+      if (node.querySelectorAll("input:not([type=hidden])").length > 1) break;
+      const v = node.querySelector(COMBO_VALUE_SEL);
+      if (v) {
+        const t = textOf(v);
+        return !!t && !COMBO_PLACEHOLDER.test(t);
+      }
+    }
+    return false;
+  }
+
   function missingRequired() {
     const out = [];
     const seenGroups = new Set();
@@ -234,10 +251,7 @@
       if (!isVisible(el)) continue;
       // A react-select search box never holds the choice: the chosen value or chips sit beside it (a multi-select
       // keeps the box visible and empty after picking).
-      if (el.getAttribute("role") === "combobox") {
-        const shell = el.closest(".select-shell, .select__control, [class*='-container'], [class*='select__value-container']");
-        if (shell && shell.querySelector("[class*='single-value'], [class*='singleValue'], [class*='multi-value'], [class*='multiValue']")) continue;
-      }
+      if ((el.getAttribute("role") === "combobox" || el.getAttribute("aria-autocomplete") === "list") && comboHasValue(el)) continue;
       if (!String(el.value || "").trim()) out.push(labelFor(el));
     }
     // Lever marks Resume/CV required only visually (no required attribute), and

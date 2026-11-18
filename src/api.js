@@ -301,9 +301,9 @@ export const nextJob = (after, { view, remote_only, min_match_score, timezone } 
   apiFetch(`/assistant/next-job${qs({ after, view, remote_only, min_match_score: min_match_score || undefined, timezone })}`);
 
 /** Latest emailed application code received after `since` (unix seconds): { connected, code, from?, subject? } */
-export const getVerificationCode = ({ since, company, exclude } = {}) =>
+export const getVerificationCode = ({ since, company, exclude, sender } = {}) =>
   apiFetch(
-    `/mail/verification-code${qs({ since: Math.floor(since), company, exclude: exclude && exclude.length ? exclude.join(",") : undefined })}`,
+    `/mail/verification-code${qs({ since: Math.floor(since), company, sender, exclude: exclude && exclude.length ? exclude.join(",") : undefined })}`,
     { timeoutMs: 60_000 }
   );
 

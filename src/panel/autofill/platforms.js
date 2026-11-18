@@ -843,7 +843,7 @@ async function enterAdpCode(tabId, company, sentAtMs) {
   while (Date.now() - started < ADP_CODE_WAIT_MS) {
     let res = null;
     try {
-      res = await api.getVerificationCode({ since, company: company || undefined, exclude: tried });
+      res = await api.getVerificationCode({ since, sender: "adp.com", exclude: tried }); // ADP's code email never names the employer
     } catch {
       res = null;
     }

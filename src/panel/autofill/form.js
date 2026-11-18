@@ -54,6 +54,7 @@ import {
   debugLog,
   delay,
   focusGate,
+  getAutofillProfile,
   submitAllowed,
   tabBroadcast,
   tabSend,
@@ -170,9 +171,14 @@ export async function startAutofill({ tab: targetTab = null, headless = false, r
     // (Apply Now, the email gate, the emailed code) in prepareOracle.
     if (engine.mode !== "workday" && engine.platform !== "jobdiva" && engine.platform !== "adp" && engine.platform !== "oracle" && !reached) {
       if (!headless) toast("Opening the application form…");
-      const hop = await reachApplicationForm(tab.id, { waitMs: headless ? 25_000 : 15_000, focus: focusGate() });
+      const hop = await reachApplicationForm(tab.id, {
+        waitMs: headless ? 25_000 : 15_000,
+        focus: focusGate(),
+        residence: () => (state.job && state.job.job_id ? getAutofillProfile(state.job.job_id).then((p) => p && p.address) : null),
+      });
       if (!hop.tab) return fail("The application tab was closed.");
       if (hop.gone) return fail("This job posting is no longer available (expired, filled or removed).");
+      if (hop.consentError) return fail(hop.consentError);
       if (!hop.ready && !(hop.gate && engine.platform === "icims")) {
         // iCIMS walks its own login and profile steps (prepareIcims writes the
         // portal login), so a page without the form yet is still its to handle.

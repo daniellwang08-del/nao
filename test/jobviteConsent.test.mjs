@@ -38,10 +38,30 @@ test("Jobvite consent: prefers the United States policy", async () => {
   assert.equal(p.sel.value, "p1");
 });
 
-test("Jobvite consent: no suitable policy leaves the page alone", async () => {
+test("Jobvite consent: no suitable policy leaves the page alone (no residence)", async () => {
   const p = consentPage(["Germany - Deutsch", "France - Français"]);
   const res = await passJobviteConsent();
   assert.ok(res.error);
   assert.equal(p.sel.value, "");
   assert.equal(p.accept.clicks, 0);
+});
+
+test("Jobvite consent: California / Non-California follows the residence", async () => {
+  let p = consentPage(["Non-California", "California"]);
+  await passJobviteConsent("california, CA, united states");
+  assert.equal(p.sel.value, "p1");
+  p = consentPage(["Non-California", "California"]);
+  await passJobviteConsent("ohio, OH, united states");
+  assert.equal(p.sel.value, "p0");
+  // Unknown residence: no guess between state-specific policies.
+  p = consentPage(["Non-California", "California"]);
+  const res = await passJobviteConsent("");
+  assert.ok(res.error);
+  assert.equal(p.sel.value, "");
+});
+
+test("Jobvite consent: India / Other picks Other for a US resident", async () => {
+  const p = consentPage(["Other", "India"]);
+  await passJobviteConsent("texas, TX, united states");
+  assert.equal(p.sel.value, "p0");
 });

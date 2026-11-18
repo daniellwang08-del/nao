@@ -56,6 +56,9 @@
       // nothing) and comboHasSelection/comboSelectionText always report empty.
       const emo = el.closest('[class*="-control"]');
       if (emo) return emo;
+      // Paylocity: the container holds the shown value and the search input (aria-owns points at its list).
+      const pcty = el.closest('.pcty-input-select-full-container, [class*="input-select-full-container"]');
+      if (pcty) return pcty;
       const cb = el.closest('[role="combobox"]');
       if (cb && cb.tagName !== "INPUT") return cb;
     }
@@ -236,7 +239,8 @@
       root.querySelector(
         '[class*="singleValue"], [class*="single-value"], [class*="multiValue"], [class*="multi-value"]'
       );
-    if (sv && clean(sv.innerText || sv.textContent)) return true;
+    const svText = sv ? clean(sv.innerText || sv.textContent) : "";
+    if (svText && !/^(select|choose|please select|--)/i.test(svText)) return true;
     // Ashby: only count a CLOSED menu + non-empty value as filled. Open menu
     // with filter text is not a commit (aria-expanded=true).
     const input = comboInput(root);

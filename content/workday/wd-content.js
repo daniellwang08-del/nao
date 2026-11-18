@@ -217,7 +217,7 @@
       if (window.top !== window || !WD || !WD.engine || !WD.engine.gateStep) return;
       WD.aborted = false;
       WD.engine
-        .gateStep(msg.creds || null)
+        .gateStep(msg.creds || null, { toSignIn: msg.toSignIn === true })
         .then((res) => sendResponse(res), (e) => sendResponse({ page: null, error: String((e && e.message) || e) }));
       return true;
     }

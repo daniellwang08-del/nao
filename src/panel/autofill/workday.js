@@ -381,7 +381,7 @@ async function handleWorkdayResolve(msg) {
 // step reloads the page, so this loop re-injects and asks the page for one
 // action at a time. One generated password serves every Workday tenant, so the
 // candidate can sign in anywhere with the same login.
-const WD_GATE_ROUNDS = 10;
+const WD_GATE_ROUNDS = 12;
 const WD_CREDENTIAL_HOST = "myworkdayjobs.com";
 
 async function workdayCredentials(email) {
@@ -455,6 +455,10 @@ export async function reachWorkdayForm(tabId, engine, email) {
   let creds = null;
   let last = "";
   let verified = false;
+  let pending = 0; // rounds spent waiting for a signed-in session's application to load
+  let reloaded = false;
+  let wantSignIn = false; // next WD_GATE: switch Create Account to Sign In
+  let triedSignIn = false;
   // The verification email can only be newer than the account: before NAO made it, look back ten minutes.
   let accountAt = Date.now() / 1000 - 600;
   for (let round = 0; round < WD_GATE_ROUNDS; round++) {
@@ -465,12 +469,28 @@ export async function reachWorkdayForm(tabId, engine, email) {
     let res = null;
     // Workday renders the posting and the account form a moment after load.
     for (let i = 0; i < 12 && !stopped(); i++) {
-      res = await tabSend(tabId, { type: "WD_GATE", creds }, 0).catch(() => null);
+      res = await tabSend(tabId, { type: "WD_GATE", creds, toSignIn: wantSignIn }, 0).catch(() => null);
       page = res && res.page;
       if (page) break;
       await delay(700);
     }
+    wantSignIn = false;
     if (!page || page === "form") return { ok: true };
+    // Signed in, but the account form is still on screen: give the application time to load, then reload once.
+    if (res && res.acted === "pending") {
+      round--;
+      if (pending++ < 8) {
+        setAutofill({ loopStatus: "Opening the application…" });
+        await delay(2000);
+        continue;
+      }
+      if (reloaded) return { ok: false, message: "Signed in to Workday, but the application did not open. Open it from the posting, then press Fill again." };
+      reloaded = true;
+      pending = 0;
+      await chrome.tabs.reload(tabId).catch(() => null);
+      await delay(3000);
+      continue;
+    }
     if (page === "verifyEmail") {
       if (verified) {
         return { ok: false, message: "Workday still asks to verify the email after its link was opened. Sign in on this page, then press Fill again." };
@@ -498,6 +518,15 @@ export async function reachWorkdayForm(tabId, engine, email) {
       }
     }
     const step = `${page}:${(res && res.acted) || ""}`;
+    // Create Account pressed twice with no error and no progress: the account most likely exists already (an
+    // earlier run made it). Sign in with the same saved password instead.
+    if (step === last && page === "createAccount" && !(res && res.error) && !triedSignIn && creds) {
+      triedSignIn = true;
+      wantSignIn = true;
+      last = "";
+      setAutofill({ loopStatus: "Signing in to your Workday account…" });
+      continue;
+    }
     if (step === last || !(res && res.acted)) {
       const why = res && res.error ? ` Workday says: ${res.error}` : "";
       const what =
