@@ -20,6 +20,9 @@ export function installMessageRouter() {
     }
     switch (msg.type) {
       case "ASK_SELECTION":
+        // Raw page report; the background resolves the tab's job and sends ASK_SELECTION_RESOLVED.
+        return;
+      case "ASK_SELECTION_RESOLVED":
         void handleAskSelection(msg);
         return;
       case "APP_SUBMITTED":

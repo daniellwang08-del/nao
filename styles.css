@@ -2724,3 +2724,28 @@ button.quick-collapsed:hover {
 .report-sent .small {
   margin: 0;
 }
+/* Answers to several selected questions: one card per question, each with its own copy button. */
+.qa-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.qa-item {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.qa-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.qa-question {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}

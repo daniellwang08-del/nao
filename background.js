@@ -342,6 +342,80 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 const APP_HELPER_FILES = ["content/ask-hotkey.js", "content/submit-watch.js"];
+
+// ── Ask about the selection ─────────────────────────────────────────────────
+// The "ask-selection" command (chrome://extensions/shortcuts, Alt+A by default) works on any page: the key press
+// grants activeTab, so the selection is read from the page's frames here. It also opens the side panel (a command is
+// a user gesture). The page hotkey (content/ask-hotkey.js, the combo set in Settings) arrives as ASK_SELECTION.
+
+/** Runs in the page: the selected text, or the selected part of a focused text box. */
+function pageSelectionText() {
+  try {
+    const sel = window.getSelection && window.getSelection();
+    const t = sel ? String(sel).trim() : "";
+    if (t) return t;
+  } catch {
+    /* ignore */
+  }
+  try {
+    let el = document.activeElement;
+    while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
+    if (el && (el.tagName === "TEXTAREA" || el.tagName === "INPUT")) {
+      const a = el.selectionStart;
+      const b = el.selectionEnd;
+      if (typeof a === "number" && typeof b === "number" && b > a) return String(el.value || "").slice(a, b).trim();
+    }
+  } catch {
+    /* ignore */
+  }
+  return "";
+}
+
+async function readTabSelection(tabId) {
+  let results = [];
+  try {
+    results = await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: pageSelectionText });
+  } catch {
+    try {
+      results = await chrome.scripting.executeScript({ target: { tabId }, func: pageSelectionText });
+    } catch {
+      results = [];
+    }
+  }
+  // The frame holding the selection answers with text; the longest wins.
+  return (results || []).map((r) => (r && r.result) || "").sort((a, b) => b.length - a.length)[0] || "";
+}
+
+async function forwardAskSelection(text, tabId) {
+  const job = await jobForTab(tabId).catch(() => null);
+  const entry = { text, empty: !text, at: Date.now(), jobId: job ? job.jobId : null, tabId };
+  await chrome.storage.session.set({ pendingAskSelection: entry }).catch(() => {});
+  // An open panel answers now; a panel that is still opening picks the stash up when it starts.
+  chrome.runtime.sendMessage({ type: "ASK_SELECTION_RESOLVED", ...entry }).catch(() => {});
+}
+
+chrome.commands.onCommand.addListener((command, tab) => {
+  if (command !== "ask-selection" || !tab || tab.id == null) return;
+  // CRITICAL: open the panel before any await; the key press's user gesture ends there.
+  if (tab.windowId != null) chrome.sidePanel.open({ windowId: tab.windowId }).catch(() => {});
+  void (async () => {
+    const text = /^https?:/i.test(tab.url || "") ? await readTabSelection(tab.id) : "";
+    await forwardAskSelection(text, tab.id);
+  })();
+});
+
+// Frames that load after the page (embedded application forms) get the page hotkey too.
+chrome.webNavigation.onCompleted.addListener((d) => {
+  if (d.frameId === 0 || !/^https?:/i.test(d.url || "")) return;
+  void (async () => {
+    if (!(await isAppAssistArmed())) return;
+    try {
+      await chrome.scripting.executeScript({ target: { tabId: d.tabId, frameIds: [d.frameId] }, files: APP_HELPER_FILES });
+    } catch {
+      /* no access to that frame */
+    }
+  })();
+});
 // Corner "Open in NAO" button, top frame of every tab NAO opened for a job.
 const JOB_FAB_FILE = "content/job-fab.js";
 
@@ -435,19 +509,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
 
-  // Content-script hotkey → stash for the side panel if it missed the message.
+  // Content-script hotkey: resolve the tab's job, stash it for a panel that is not open yet, and hand it over.
   if (msg && msg.type === "ASK_SELECTION") {
-    const text = String((msg && msg.text) || "").trim();
-    chrome.storage.session
-      .set({
-        pendingAskSelection: {
-          text,
-          empty: !text || !!msg.empty,
-          at: Date.now(),
-        },
-      })
-      .catch(() => {});
-    // Side panel also receives this message via its own onMessage listener.
+    const tabId = sender && sender.tab ? sender.tab.id : null;
+    void forwardAskSelection(String((msg && msg.text) || "").trim(), tabId);
     sendResponse({ ok: true });
     return false;
   }

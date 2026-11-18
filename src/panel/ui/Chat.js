@@ -29,8 +29,55 @@ function copy(text) {
   );
 }
 
+/**
+ * An answer to several selected questions: "### question" then its answer, per question. Returns
+ * [{ question, answer }] when there are at least two, else null (a single answer shows as before).
+ */
+export function splitPerQuestion(content) {
+  const text = String(content || "");
+  if (!/^###\s+/m.test(text)) return null;
+  const parts = [];
+  let cur = null;
+  for (const line of text.split("\n")) {
+    const h = line.match(/^###\s+(.*)$/);
+    if (h) {
+      cur = { question: h[1].trim(), lines: [] };
+      parts.push(cur);
+    } else if (cur) {
+      cur.lines.push(line);
+    }
+  }
+  const out = parts.map((p) => ({ question: p.question, answer: p.lines.join("\n").trim() })).filter((p) => p.question || p.answer);
+  return out.length >= 2 ? out : null;
+}
+
+function PerQuestionAnswers({ parts }) {
+  return html`<div class="qa-list">
+    ${parts.map(
+      (p, i) => html`<div class="qa-item" key=${i}>
+        <div class="qa-head">
+          <p class="qa-question">${p.question}</p>
+          <${IconButton} icon="copy" size=${14} label=${`Copy answer ${i + 1}`} onClick=${() => copy(p.answer)} />
+        </div>
+        <div class="md" dangerouslySetInnerHTML=${{ __html: renderMarkdown(p.answer) }}></div>
+      </div>`,
+    )}
+  </div>`;
+}
+
 function Message({ m }) {
   if (m.role === "user") return html`<div class="msg msg-user">${m.content}</div>`;
+  const parts = !m.streaming && m.perQuestion ? splitPerQuestion(m.content) : null;
+  if (parts) {
+    return html`<div class="msg msg-assistant">
+      <${PerQuestionAnswers} parts=${parts} />
+      <div class="msg-tools">
+        ${m.stopped ? html`<span class="muted small">Stopped</span>` : null}
+        <span class="muted small">${parts.length} answers</span>
+        <${IconButton} icon="copy" size=${14} label="Copy all answers" onClick=${() => copy(parts.map((p) => `${p.question}\n${p.answer}`).join("\n\n"))} />
+      </div>
+    </div>`;
+  }
   return html`<div class=${`msg msg-assistant${m.error ? " is-error" : ""}`}>
     ${m.error && !m.content
       ? html`<p>${m.error}</p>`

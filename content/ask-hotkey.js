@@ -2,8 +2,18 @@
 // On match, sends the current text selection to the extension assistant chat.
 
 (function () {
-  if (window.__NAO_ASK_HOTKEY__) return;
-  window.__NAO_ASK_HOTKEY__ = true;
+  // Injected again after an extension update (the old copy's chrome.runtime is gone): the newest copy owns the key.
+  // An "already installed" flag would leave the page with only the dead listener.
+  const token = `${Date.now()}-${Math.random()}`;
+  window.__NAO_ASK_HOTKEY__ = token;
+  const current = () => window.__NAO_ASK_HOTKEY__ === token;
+  const alive = () => {
+    try {
+      return !!(chrome.runtime && chrome.runtime.id);
+    } catch {
+      return false;
+    }
+  };
 
   const DEFAULT = { ctrl: false, alt: true, shift: false, meta: false, key: "a" };
 
@@ -52,7 +62,12 @@
     if (!!e.shiftKey !== !!combo.shift) return false;
     if (!!e.metaKey !== !!combo.meta) return false;
     const pressed = e.key === " " ? "space" : String(e.key || "").toLowerCase();
-    return pressed === combo.key;
+    if (pressed === combo.key) return true;
+    // Option/Alt changes the character on a Mac (Option+A types "å"): compare the physical key too.
+    const code = String(e.code || "");
+    if (/^Key[A-Z]$/.test(code)) return code.slice(3).toLowerCase() === combo.key;
+    if (/^Digit[0-9]$/.test(code)) return code.slice(5) === combo.key;
+    return false;
   }
 
   function selectedText() {
@@ -62,9 +77,10 @@
     } catch {
       /* ignore */
     }
-    // Fallback: selected text inside focused input/textarea.
+    // Fallback: selected text inside focused input/textarea (also inside shadow roots).
     try {
-      const el = document.activeElement;
+      let el = document.activeElement;
+      while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
       if (
         el &&
         (el.tagName === "TEXTAREA" ||
@@ -86,6 +102,7 @@
   document.addEventListener(
     "keydown",
     (e) => {
+      if (!current() || !alive()) return;
       if (e.repeat || e.isComposing) return;
       if (!matches(e)) return;
       const text = selectedText();

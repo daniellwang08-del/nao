@@ -285,13 +285,18 @@ export async function downloadDoc(fileTypes, label, { source = "tailored" } = {}
 
 let chatAbort = null;
 
-export async function ask(question) {
+export async function ask(question, { fromSelection = false } = {}) {
   const job = state.job;
   const text = String(question || "").trim();
   if (!job || !text || state.chat.streaming) return;
   const ctrl = new AbortController();
   chatAbort = ctrl;
-  const messages = [...state.chat.messages, { role: "user", content: text }, { role: "assistant", content: "", streaming: true }];
+  const messages = [
+    ...state.chat.messages,
+    { role: "user", content: text },
+    // A selection may hold several form questions: the answer comes back one "### question" block per answer.
+    { role: "assistant", content: "", streaming: true, perQuestion: fromSelection },
+  ];
   setState({ chat: { messages, streaming: true } });
   const updateLast = (fn) => {
     if (chatAbort !== ctrl) return;
@@ -301,7 +306,13 @@ export async function ask(question) {
   };
   try {
     await api.chatStream(
-      { job_id: job.job_id, message: text, style: state.chatStyle, field_type: state.answerType || null },
+      {
+        job_id: job.job_id,
+        message: text,
+        style: state.chatStyle,
+        field_type: state.answerType || null,
+        answer_each_question: fromSelection,
+      },
       { signal: ctrl.signal, onDelta: (d) => updateLast((m) => ({ ...m, content: m.content + d })) },
     );
     updateLast((m) => ({ ...m, streaming: false }));
@@ -316,6 +327,12 @@ export async function ask(question) {
       chatAbort = null;
       setState({ chat: { ...state.chat, streaming: false } });
     }
+  }
+  // A hotkey press that came in while this answer streamed.
+  if (queuedAsk) {
+    const next = queuedAsk;
+    queuedAsk = null;
+    void handleAskSelection(next);
   }
 }
 
@@ -678,24 +695,38 @@ export async function armAskHotkey({ requestPermission = false, jobUrl = null } 
 }
 
 let lastAskAt = 0;
+let lastAskText = "";
+let queuedAsk = null;
 
 export async function handleAskSelection(msg) {
-  const now = Date.now();
-  if (now - lastAskAt < 400) return;
-  lastAskAt = now;
-  chrome.storage.session.remove("pendingAskSelection").catch(() => {});
   const text = String((msg && msg.text) || "").trim();
+  const now = Date.now();
+  // The same press can arrive twice (the message and the stash); a different selection is a new question.
+  if (now - lastAskAt < 1500 && text === lastAskText) return;
+  lastAskAt = now;
+  lastAskText = text;
+  chrome.storage.session.remove("pendingAskSelection").catch(() => {});
   if (!text || (msg && msg.empty)) {
     toast("Select the question on the page, then press the hotkey.");
     return;
   }
   if (!state.user) return toast("Sign in to ask the assistant.");
-  if (state.view !== "job" || !state.job) return toast("Open a job first, then use the hotkey.");
-  if (state.chat.streaming) return toast("Wait for the current answer to finish.");
-  await ask(text);
+  // The page's job (the tab NAO opened it in) when the panel shows another job or none.
+  const jobId = msg && msg.jobId ? String(msg.jobId) : "";
+  if (jobId && (!state.job || String(state.job.job_id) !== jobId)) {
+    await openJob(jobId).catch(() => null);
+  }
+  if (!state.job) return toast("Open the job in NAO first, then use the hotkey.");
+  if (state.view !== "job") setState({ view: "job" });
+  if (state.chat.streaming) {
+    queuedAsk = { text, jobId };
+    toast("Answering after the current answer finishes.");
+    return;
+  }
+  await ask(text, { fromSelection: true });
 }
 
-async function consumePendingAskSelection() {
+export async function consumePendingAskSelection() {
   try {
     const { pendingAskSelection: pending } = await chrome.storage.session.get("pendingAskSelection");
     if (!pending || !pending.at) return;

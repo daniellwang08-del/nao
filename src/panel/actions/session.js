@@ -8,7 +8,7 @@ import { live } from "../live.js";
 import { resetState, setState, state } from "../state.js";
 import { toast } from "../toast.js";
 import { goHome, loadHome } from "./home.js";
-import { consumePendingHandoffs } from "./job.js";
+import { consumePendingAskSelection, consumePendingHandoffs } from "./job.js";
 
 export async function init() {
   api.onUnauthorized((reason) => {
@@ -32,6 +32,8 @@ export async function init() {
     live.start();
     void refreshAccount({ quiet: true });
     await consumePendingHandoffs();
+    // A hotkey press that opened the panel: answer it now.
+    await consumePendingAskSelection();
     return;
   }
   if (token) await storage.clearToken();
