@@ -151,7 +151,7 @@
     else if (byId("guestFirstName") || byId("guestEmail")) kind = "login";
     else if (button(/^consent\s*&\s*continue$/i)) kind = "consent";
     else if ((step = wizardStep())) kind = step === "Self-Attest & Submit" ? "attest" : "wizard";
-    else if (byId("recruitment_jobDescription_apply") || byId("recruitment_jobDescription_candidateApply")) kind = "posting";
+    else if (byId("recruitment_jobDescription_apply") || byId("recruitment_jobDescription_candidateApply") || resumeButton()) kind = "posting";
     const challenge = [...document.querySelectorAll('iframe[src*="recaptcha"][src*="bframe"]')].some((f) => {
       const r = f.getBoundingClientRect();
       return r.width > 50 && r.height > 50;
@@ -205,8 +205,17 @@
 
   // ── gate actions ───────────────────────────────────────────────────────────
 
+  // After sign-in (or for an application started earlier) the posting shows "Pending Submission" with
+  // "Complete Your Application" instead of Apply.
+  function resumeButton() {
+    const byIdBtn = byId("recruitment_jobDescription_complete");
+    if (byIdBtn) return byIdBtn;
+    const re = /^(complete your application|continue (your )?application|resume (your )?application)$/i;
+    return deepAll("button, [role=button], sdf-button, a").find((b) => shown(b) && re.test(labelOf(b))) || null;
+  }
+
   async function apply() {
-    const b = byId("recruitment_jobDescription_apply") || byId("recruitment_jobDescription_candidateApply");
+    const b = byId("recruitment_jobDescription_apply") || byId("recruitment_jobDescription_candidateApply") || resumeButton();
     if (!b) return { ok: false };
     const before = stage().key;
     b.click();

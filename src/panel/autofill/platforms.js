@@ -758,10 +758,24 @@ export async function dayforceAcknowledge(tabId) {
 // (name, email, mobile) and Continue, the verification code sent to the email and read from the connected inbox,
 // then the "Applying for ..." wizard (filled step by step by the run) up to Self-Attest.
 
+// ADP loads a new page at some steps (Verify goes to postLogin.html), which drops the engine scripts: when the page
+// does not answer, wait for it to finish loading, inject the engine again and ask once more.
 export async function adpStage(tabId) {
   if (tabId == null) return null;
-  const r = await tabSend(tabId, { type: "AF_ADP_STAGE" }, 0);
-  return r && r.ok ? r.stage : null;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const r = await tabSend(tabId, { type: "AF_ADP_STAGE" }, 0).catch(() => null);
+    if (r && r.ok) return r.stage;
+    const end = Date.now() + 20_000;
+    while (Date.now() < end) {
+      const tab = await chrome.tabs.get(tabId).catch(() => null);
+      if (!tab) return null;
+      if (tab.status === "complete") break;
+      await delay(400);
+    }
+    await reinjectEngine(tabId, { scripts: "greenhouse" });
+    await delay(attempt === 0 ? 800 : 2000);
+  }
+  return null;
 }
 
 
@@ -865,8 +879,11 @@ async function enterAdpCode(tabId, company, sentAtMs) {
     if (res && res.code) {
       tried.push(res.code);
       setAutofill({ runStatus: `Entering the code from ${res.from || "your email"}…` });
-      const r = await tabSend(tabId, { type: "AF_ADP_ENTER_CODE", code: res.code }, 0);
+      const r = await tabSend(tabId, { type: "AF_ADP_ENTER_CODE", code: res.code }, 0).catch(() => null);
       if (r && r.ok) return { ok: true };
+      // Verify loads a new page, so the answer is often lost: the page itself says whether the code went through.
+      const after = await adpStage(tabId);
+      if (after && after.kind !== "otp-code") return { ok: true };
       setAutofill({ runStatus: "That code was not accepted…" });
     }
   }
