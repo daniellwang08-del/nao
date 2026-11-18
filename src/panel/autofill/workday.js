@@ -424,35 +424,48 @@ async function passWorkdayGate(tabId, engine, profile) {
   return false;
 }
 
-const WD_LINK_WAIT_MS = 180_000;
+// Emails take a while to arrive: the inbox is checked this long after the request, then once more after the same
+// wait. Still nothing: the candidate finishes the step.
+const WD_INBOX_CHECK_MS = 30_000;
+const WD_INBOX_CHECKS = 2;
+
+/** Wait in small steps so Stop takes effect at once. */
+async function waitUnlessStopped(ms, stopped) {
+  const end = Date.now() + ms;
+  while (Date.now() < end && !stopped()) await delay(Math.min(1000, end - Date.now()));
+}
 
 /**
- * Poll the connected inbox for Workday's emailed link to this tab's host: the account activation link
- * (kind "verify") or the password reset link (kind "reset"). Returns { url } or { message }.
+ * The emailed link for this job's Workday site: the account activation link (kind "verify") or the password reset
+ * link (kind "reset"). Checks the connected inbox 30 s after the request and again 30 s later.
+ * Returns { url, forThisJob } or { message }.
  */
-async function waitInboxLink(tabId, since, stopped, kind = "verify") {
-  const tab = await chrome.tabs.get(tabId).catch(() => null);
+async function waitInboxLink(jobUrl, since, stopped, kind = "verify") {
   let host = "";
+  let jobPath = "";
   try {
-    host = new URL((tab && tab.url) || "").hostname;
+    const u = new URL(jobUrl || "");
+    host = u.hostname;
+    jobPath = u.pathname;
   } catch {
-    /* no host */
+    /* no job URL */
   }
   const manual =
     kind === "reset"
       ? "Workday sent a password reset email. Open the link in it, set your password, sign in, then press Fill again."
       : "Workday sent a verification email. Open the link in it, sign in on this page, then press Fill again.";
   if (!host) return { message: manual };
-  const until = Date.now() + WD_LINK_WAIT_MS;
-  while (Date.now() < until && !stopped()) {
-    const res = await api.getVerificationLink({ since, host, kind }).catch(() => null);
-    if (res && res.connected === false) {
-      return { message: `${manual} (Connect your inbox in NAO and it will do this for you.)` };
-    }
-    if (res && res.link) return { url: res.link };
-    await delay(6000);
+  for (let check = 1; check <= WD_INBOX_CHECKS; check++) {
+    setAutofill({
+      loopStatus: `Waiting for Workday's ${kind === "reset" ? "password reset" : "verification"} email (check ${check} of ${WD_INBOX_CHECKS} in 30 s)…`,
+    });
+    await waitUnlessStopped(WD_INBOX_CHECK_MS, stopped);
+    if (stopped()) return { message: manual };
+    const res = await api.getVerificationLink({ since, host, kind, job: jobPath }).catch(() => null);
+    if (res && res.connected === false) return { message: `${manual} (Connect your inbox in NAO and it will do this for you.)` };
+    if (res && res.link) return { url: res.link, forThisJob: res.for_this_job !== false };
   }
-  return { message: `No ${kind === "reset" ? "password reset" : "verification"} email from Workday arrived in 3 minutes. ${manual}` };
+  return { message: `No ${kind === "reset" ? "password reset" : "verification"} email from Workday arrived after ${WD_INBOX_CHECKS} checks a minute apart. ${manual}` };
 }
 
 // Workday says the new password is not allowed (reused, too weak): a fresh one is generated once.
@@ -476,6 +489,10 @@ export async function reachWorkdayForm(tabId, engine, email) {
   const stopped = () => !state.autofill.active || state.autofill.loopStop;
   const fail = (message) => ({ ok: false, message });
   const userId = state.user && state.user.user_id;
+  // This job's page: emailed links are matched to it, and it is reopened when a link leads elsewhere.
+  const jobTab = await chrome.tabs.get(tabId).catch(() => null);
+  const jobUrl = (jobTab && jobTab.url) || "";
+  let resetForThisJob = true;
   let creds = null;
   let last = "";
   let verified = false;
@@ -527,8 +544,7 @@ export async function reachWorkdayForm(tabId, engine, email) {
     if (page === "verifyEmail") {
       if (verified) return fail("Workday still asks to verify the email after its link was opened. Sign in on this page, then press Fill again.");
       // Workday emailed an activation link: take it from the connected inbox, open it, then sign in.
-      setAutofill({ loopStatus: "Waiting for Workday's verification email…" });
-      const link = await waitInboxLink(tabId, accountAt, stopped, "verify");
+      const link = await waitInboxLink(jobUrl, accountAt, stopped, "verify");
       if (stopped()) return { ok: false, stopped: true };
       if (!link.url) return fail(link.message);
       verified = true;
@@ -561,10 +577,11 @@ export async function reachWorkdayForm(tabId, engine, email) {
       if (res.error) return fail(`Workday did not send the password reset email.${why} Finish this page yourself, then press Fill again.`);
       // The reset email can only be newer than this click (a few seconds of clock slack).
       const requestedAt = Date.now() / 1000 - 10;
-      setAutofill({ loopStatus: "Waiting for Workday's password reset email…" });
-      const link = await waitInboxLink(tabId, requestedAt, stopped, "reset");
+      const link = await waitInboxLink(jobUrl, requestedAt, stopped, "reset");
       if (stopped()) return { ok: false, stopped: true };
       if (!link.url) return fail(link.message);
+      // Reset tokens belong to the account: the newest link is the valid one even when it redirects to another job.
+      resetForThisJob = link.forThisJob;
       setAutofill({ loopStatus: "Opening the password reset page…" });
       await chrome.tabs.update(tabId, { url: link.url }).catch(() => null);
       await delay(3000);
@@ -587,8 +604,15 @@ export async function reachWorkdayForm(tabId, engine, email) {
         return fail(`Workday did not accept the new password.${why} Set it on this page, sign in, then press Fill again.`);
       }
       resetDone = true;
-      setAutofill({ loopStatus: "Password reset. Signing in…" });
       last = "";
+      if (!resetForThisJob && jobUrl) {
+        // The link redirects to another job's application: open this job and sign in from its own Apply.
+        setAutofill({ loopStatus: "Password reset. Opening this job to sign in…" });
+        await chrome.tabs.update(tabId, { url: jobUrl }).catch(() => null);
+        await delay(3000);
+        continue;
+      }
+      setAutofill({ loopStatus: "Password reset. Signing in…" });
       await delay(2500);
       continue;
     }

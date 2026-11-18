@@ -764,7 +764,6 @@ export async function adpStage(tabId) {
   return r && r.ok ? r.stage : null;
 }
 
-const ADP_CODE_WAIT_MS = 150_000;
 
 // "+<country code><number>" for ADP's mobile box: a stored "+1 253-220-9979" or "2532209979" with code 1 both
 // become "+12532209979" (never the code twice).
@@ -839,13 +838,23 @@ export async function prepareAdp(tabId, eng, ctx) {
 // ADP's code email never names the employer, so parallel ADP applications are told apart by time: each one
 // registers its Send click (claim = job + Send time) and the server hands out ADP's emails first-come-first-served,
 // each to the first application still waiting that clicked Send before the email arrived.
+const ADP_INBOX_CHECK_MS = 30_000;
+const ADP_INBOX_CHECKS = 2;
+
 async function enterAdpCode(tabId, company, sentAtMs) {
   const since = Math.floor(sentAtMs / 1000) - 5; // only mail sent after Send
   const claim = `${(state.job && state.job.job_id) || "job"}:${Math.round(sentAtMs)}`;
   const tried = [];
-  const started = Date.now();
-  setAutofill({ runStatus: "Waiting for the verification code in your email…" });
-  while (Date.now() - started < ADP_CODE_WAIT_MS) {
+  // Emails take a while to arrive: check 30 s after Send and once more 30 s later (a code typed on the page in the
+  // meantime counts too). Still nothing: the candidate enters it.
+  for (let check = 1; check <= ADP_INBOX_CHECKS; check++) {
+    setAutofill({ runStatus: `Waiting for ADP's verification code in your email (check ${check} of ${ADP_INBOX_CHECKS} in 30 s)…` });
+    const due = Math.max(sentAtMs + check * ADP_INBOX_CHECK_MS, Date.now() + (check === 1 ? 0 : ADP_INBOX_CHECK_MS));
+    while (Date.now() < due) {
+      const st = await adpStage(tabId);
+      if (st && st.kind !== "otp-code") return { ok: true }; // the candidate entered it
+      await delay(Math.min(2000, Math.max(0, due - Date.now())));
+    }
     let res = null;
     try {
       res = await api.getVerificationCode({ since, sender: "adp.com", claim, sentAt: sentAtMs / 1000, exclude: tried });
@@ -858,11 +867,8 @@ async function enterAdpCode(tabId, company, sentAtMs) {
       setAutofill({ runStatus: `Entering the code from ${res.from || "your email"}…` });
       const r = await tabSend(tabId, { type: "AF_ADP_ENTER_CODE", code: res.code }, 0);
       if (r && r.ok) return { ok: true };
-      setAutofill({ runStatus: "That code was not accepted, waiting for a newer one…" });
+      setAutofill({ runStatus: "That code was not accepted…" });
     }
-    const st = await adpStage(tabId);
-    if (st && st.kind !== "otp-code") return { ok: true }; // the candidate entered it
-    await delay(4000);
   }
   // No inbox (or no code): the candidate enters it; continue as soon as the page moves on.
   setAutofill({ runStatus: "Enter the verification code from your email on the page. Autofill continues after Verify." });
