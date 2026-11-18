@@ -36,8 +36,10 @@ const refillTabId = params.get("tab") ? Number(params.get("tab")) : null;
 const READY_TO_SUBMIT = /^(oracle|adp|dayforce|icims)-submit$/;
 // Account sites whose engine opens the posting, creates or signs in to the candidate's account and fills every step
 // itself (Workday: Apply, Apply Manually, Create Account / Sign In, the inbox's verification link, then the steps).
-const ENGINE_HANDLES_ACCOUNT = new Set(["workday"]);
-const SOFT_NOTES = new Set(["oracle-resume-import"]);
+const ENGINE_HANDLES_ACCOUNT = new Set(["workday", "icims"]);
+// Notes that are not blockers. "icims-credentials" carries the new portal password: it must never reach the run
+// message (shown in the console and stored in the run report).
+const SOFT_NOTES = new Set(["oracle-resume-import", "icims-credentials"]);
 
 let submittedSignal = null;
 let ownTabId = null;
@@ -169,10 +171,13 @@ async function navigate(tabId, url) {
 
 // ── fill ────────────────────────────────────────────────────────────────────
 
-async function waitForFill() {
+// iCIMS: the email gate (up to 3 min), the resume parse, then several steps each submitted to move on.
+const ICIMS_FILL_TIMEOUT_MS = 15 * 60_000;
+
+async function waitForFill(limitMs = FILL_TIMEOUT_MS) {
   const started = Date.now();
   let lastStatus = "";
-  while (Date.now() - started < FILL_TIMEOUT_MS) {
+  while (Date.now() - started < limitMs) {
     const af = state.autofill;
     if (af.runStatus && af.runStatus !== lastStatus) {
       lastStatus = af.runStatus;
@@ -194,7 +199,7 @@ async function fill(tab) {
     if (await jobGone(tab.id, 0)) throw postingGone();
     throw needsYou((res && res.error) || "Autofill could not start on this page.");
   }
-  const af = await waitForFill();
+  const af = await waitForFill(lastPlatform === "icims" ? ICIMS_FILL_TIMEOUT_MS : FILL_TIMEOUT_MS);
   if (af.error) {
     if (await jobGone(tab.id, 0)) throw postingGone();
     throw needsYou(af.error);
@@ -209,6 +214,7 @@ async function fill(tab) {
   // Multi-step engines end with "every section is filled, review and click Submit": the application is ready, not
   // stuck. An Oracle resume import that failed is not a blocker either: every section is still filled.
   const all = af.needsUser || [];
+  if (all.some((n) => n.cid === "icims-credentials")) step("Created an iCIMS account for this employer; its password is saved in NAO.");
   const readyToSubmit = all.some((n) => READY_TO_SUBMIT.test(n.cid || ""));
   const needs = all
     .filter((n) => !READY_TO_SUBMIT.test(n.cid || "") && !SOFT_NOTES.has(n.cid || ""))
@@ -371,6 +377,9 @@ async function leaveBoard(tab, job) {
   const reached = await reachApplicationForm(tab.id, { onStep: step, waitMs: 25_000, focus: wakeTab });
   if (!reached.tab) throw new Stop("failed", "The application tab was closed.");
   if (reached.gone) throw postingGone();
+  if (reached.botWall) {
+    throw needsYou(`${via} is showing a "confirm you are human" check. Open the job on ${via} yourself and press Apply there.`);
+  }
   if (onBoard(reached.tab.url)) {
     throw needsYou(`${via} did not open the employer's application. Open it from the page (signing in to ${via} may be needed).`);
   }
@@ -413,10 +422,13 @@ async function run(cfg) {
       focus: wakeTab,
       // Consent steps that ask for the place of residence (Jobvite) choose from the profile address.
       residence: () => getAutofillProfile(job.job_id).then((p) => p && p.address),
+      // A careers page listing jobs: its link to this posting (on an ATS) carries the title.
+      jobTitle: job.title || "",
     });
     if (!reached.tab) throw new Stop("failed", "The application tab was closed.");
     tab = reached.tab;
     if (reached.gone) throw postingGone();
+    if (reached.botWall) throw needsYou('This site is showing a "confirm you are human" check. Complete it on the page, then start again.');
     if (reached.consentError) throw needsYou(reached.consentError);
     if (!reached.ready && reached.account) throw needsYou(NEEDS_ACCOUNT_MESSAGE);
     if (!reached.ready && reached.steps.length) {

@@ -544,7 +544,10 @@
     if (visibleAid("adventureButton") && !D.exists(S.AID("applyFlowPage"))) return "posting";
     if (detectStep()) return "form";
     const text = (document.body && document.body.innerText) || "";
-    return GATE_VERIFY_RE.test(text.slice(0, 6000)) ? "verifyEmail" : null;
+    if (GATE_VERIFY_RE.test(text.slice(0, 6000))) return "verifyEmail";
+    // Still loading (Apply redirects to /login, which renders slowly behind Workday's loading panel).
+    if (visibleAid("wd-LoadingPanel") || /\/(apply|login)\/?$/i.test(location.pathname)) return "loading";
+    return null;
   }
 
   function typeInto(el, value) {

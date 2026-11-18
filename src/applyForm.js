@@ -31,10 +31,16 @@ export const GONE_TEXT =
   "(page|job|position) (could not|couldn'?t|cannot|can'?t) be found|(page|job|position|posting) not found|" +
   "couldn'?t find (anything|the page|that page|the job|this job|that job)|(page|job|position|posting) (doesn'?t|does not) exist|" +
   "applications? (are |is )?(now )?closed|not accepting (applications|candidates)|^404\\b|\\b404 (error|not found)|error 404|" +
-  "you'?ve gone too far|(job|position|posting|role)s? (you('re| are) looking for )?may have (closed|expired|been (filled|removed|closed))|(hiring|recruiting|position|job|posting|requisition)( for this (job|position|role))? (has been put|is( currently)?) on hold";
+  "you'?ve gone too far|^closed ?: ?[a-z]+ \\d{1,2},? \\d{4}$|(job|position|posting|role)s? (you('re| are) looking for )?may have (closed|expired|been (filled|removed|closed))|(hiring|recruiting|position|job|posting|requisition)( for this (job|position|role))? (has been put|is( currently)?) on hold";
 // Where job boards send a dead posting: Greenhouse back to the board with
 // ?error=true, Workable to the company page with ?not_found=true.
 export const GONE_URL = "[?&](error|not_found)=true\\b|/(404|not-found|job-not-found)(/|$|\\?)";
+
+// Hosts of application systems a careers page may link a posting to.
+export const ATS_HOST =
+  "(^|\\.)(greenhouse\\.io|lever\\.co|ashbyhq\\.com|smartrecruiters\\.com|workable\\.com|rippling\\.com|myworkdayjobs\\.com|" +
+  "icims\\.com|jobvite\\.com|bamboohr\\.com|breezy\\.hr|applytojob\\.com|recruitee\\.com|teamtailor\\.com|pinpointhq\\.com|" +
+  "dayforcehcm\\.com|taleo\\.net|ultipro\\.com|jobs\\.gem\\.com|paylocity\\.com|jazzhr\\.com|workforcenow\\.adp\\.com)$";
 
 // What callers say when the page cannot be filled safely.
 export const NO_FORM_MESSAGE = "Couldn't find the application form on this page. Open it, then try again.";
@@ -271,7 +277,7 @@ export function probeApplyPage(rules, act) {
     const norm = (t) => String(t || "").replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, " ").trim().toLowerCase();
     gone = !!rules.goneUrl && new RegExp(rules.goneUrl, "i").test(String(location.pathname || "") + String(location.search || ""));
     if (!gone) {
-      const noticeSel = "h1, h2, h3, [role=alert], [class*=flash], [class*=alert], [class*=error], [class*=notice], [class*=not-found], [class*=notfound], [class*=empty-state]";
+      const noticeSel = "h1, h2, h3, [role=alert], [class*=flash], [class*=alert], [class*=error], [class*=notice], [class*=not-found], [class*=notfound], [class*=empty-state], .opportunity-sidebar li";
       const notices = [document.title, ...Array.from(document.querySelectorAll(noticeSel)).filter(visible).map(text)];
       gone = notices.some((t) => goneRe.test(norm(t)));
     }
@@ -284,7 +290,15 @@ export function probeApplyPage(rules, act) {
   const base = account ? { ready, fields, gone, account } : { ready, fields, gone };
   if (gate) base.gate = gate;
   if (consent) base.consent = consent;
-  if (ready || gone || gate || consent || !act) return base;
+  // A "confirm you are human" wall (AWS WAF, Cloudflare): never clicked through; the person does it.
+  try {
+    const wallEl = document.querySelector("#captcha-container, .amzn-captcha-root, #challenge-form, #cf-challenge-running, #challenge-stage");
+    const head = `${document.title || ""} ${text(document.querySelector("h1") || document.body || document.documentElement).slice(0, 200)}`;
+    if (!ready && (wallEl || /confirm you('| a)re (a )?human|verify you are human|just a moment\.\.\./i.test(head))) base.botWall = true;
+  } catch {
+    /* ignore */
+  }
+  if (ready || gone || gate || consent || base.botWall || !act) return base;
 
   // Lazy Turbo frames (Teamtailor's application form) wait for an IntersectionObserver that never fires in a
   // background tab: load them now.
@@ -293,24 +307,37 @@ export function probeApplyPage(rules, act) {
   } catch {
     /* ignore */
   }
-  // An embedded Greenhouse board: open its frame full-page, where the form loads without the host page's scripts.
-  if (act !== "peek") {
-    try {
+  // An embedded Greenhouse board: open its frame full-page, where the form loads without the host page's scripts
+  // (lazy-loading plugins such as NitroPack hold the embed back in a background tab). Without the frame yet, the
+  // board comes from the embed script and the job from ?gh_jid=.
+  try {
+    if (typeof window !== "undefined" && window.top === window) {
       const gh = document.querySelector("iframe#grnhse_iframe");
       const src = gh && (gh.getAttribute("src") || gh.getAttribute("nitro-lazy-src") || gh.getAttribute("data-src"));
-      if (src && /^https:/i.test(src) && typeof window !== "undefined" && window.top === window) {
-        return { ready: false, fields, label: "Application form", href: new URL(src, location.href).href };
+      if (src && /^https:/i.test(src)) return { ready: false, fields, label: "Application form", href: new URL(src, location.href).href };
+      if (document.getElementById("grnhse_app")) {
+        const jid = new URLSearchParams(location.search).get("gh_jid");
+        let board = "";
+        for (const sc of Array.from(document.querySelectorAll("script"))) {
+          const u = sc.getAttribute("src") || sc.getAttribute("data-src") || sc.getAttribute("nitro-src") || sc.getAttribute("nitro-lazy-src") || "";
+          const m = u.match(/greenhouse\.io\/embed\/job_board\/js\?for=([\w-]+)/i);
+          if (m) board = m[1];
+        }
+        if (board && jid) {
+          return { ready: false, fields, label: "Application form", href: `https://job-boards.greenhouse.io/embed/job_app?for=${board}&token=${encodeURIComponent(jid)}` };
+        }
+        base.embedPending = true;
       }
-    } catch {
-      /* ignore */
     }
+  } catch {
+    /* ignore */
   }
 
   const applyText = new RegExp(rules.applyText);
   const notApply = new RegExp(rules.notApplyText);
   const applyAttr = new RegExp(rules.applyAttr);
   const candidates = deepAll("a, button, [role=button], input[type=button], input[type=submit]")
-    .filter((el) => visible(el) && !el.disabled && attr(el, "aria-disabled") !== "true")
+    .filter((el) => visible(el) && !el.disabled && attr(el, "aria-disabled") !== "true" && !(el.closest && el.closest("[id*=captcha], [class*=captcha]")))
     .map((el) => {
       // A button inside a web component's shadow root shows the host's slotted text (UKG <ukg-button>).
       const root = el.getRootNode ? el.getRootNode() : null;
@@ -327,7 +354,27 @@ export function probeApplyPage(rules, act) {
     .filter(Boolean)
     .sort((a, b) => b.score - a.score);
   const hit = candidates[0];
-  if (!hit) return base;
+  if (!hit) {
+    // A careers page listing jobs: the link to this posting on a known ATS (its text carries the job title).
+    const n = (v) => String(v || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const want = n(rules.jobTitle);
+    if (want.length < 6 || !rules.atsHost) return base;
+    const ats = new RegExp(rules.atsHost, "i");
+    for (const a of deepAll("a[href], a[data-href]").filter(visible)) {
+      let u;
+      try {
+        u = new URL(attr(a, "href") || attr(a, "data-href"), location.href);
+      } catch {
+        continue;
+      }
+      if (!/^https?:$/.test(u.protocol) || !ats.test(u.hostname) || u.hostname === location.hostname) continue;
+      if (!(" " + n(a.innerText || a.textContent) + " ").includes(" " + want + " ")) continue;
+      const label = String(rules.jobTitle).slice(0, 60);
+      if (act === "peek") return { ...base, candidate: { label, score: 0.5 } };
+      return { ready: false, fields, label, href: u.href };
+    }
+    return base;
+  }
   if (act === "peek") return { ...base, candidate: { label: hit.t, score: hit.score } };
   // In a sub-frame (iCIMS renders the job in #icims_content_iframe) the link is clicked in place.
   const framed = typeof window !== "undefined" && window.top !== window;
@@ -359,7 +406,7 @@ export function probeApplyPage(rules, act) {
   return { ready: false, fields, label: hit.t, clicked: true };
 }
 
-const RULES = { applyText: APPLY_TEXT, notApplyText: NOT_APPLY_TEXT, applyAttr: APPLY_ATTR, minFields: MIN_FORM_FIELDS, goneText: GONE_TEXT, goneUrl: GONE_URL };
+const RULES = { applyText: APPLY_TEXT, notApplyText: NOT_APPLY_TEXT, applyAttr: APPLY_ATTR, minFields: MIN_FORM_FIELDS, goneText: GONE_TEXT, goneUrl: GONE_URL, atsHost: ATS_HOST };
 // The rules probeApplyPage is called with (tests and tooling run it directly).
 export const PROBE_RULES = RULES;
 const HOPS = 3;
@@ -400,7 +447,8 @@ export async function passJobviteConsent(residence = "") {
       return /^(i )?(accept|agree)\b/.test(t) && r.width > 0 && r.height > 0 && !b.disabled;
     });
     if (accept) {
-      accept.click();
+      // Accept re-routes the frame: click after this result has been returned, or the result is lost.
+      setTimeout(() => accept.click(), 50);
       return { clicked: true, label: "Accept data consent" };
     }
   }
@@ -436,12 +484,12 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function probe(tabId, act) {
+async function probe(tabId, act, rules = RULES) {
   try {
     const results = await chrome.scripting.executeScript({
       target: { tabId, allFrames: !act },
       func: probeApplyPage,
-      args: [RULES, act],
+      args: [rules, act],
     });
     return (results || []).map((r) => r && r.result).filter(Boolean);
   } catch {
@@ -451,10 +499,10 @@ async function probe(tabId, act) {
 
 /** Act on the frame whose Apply control scores best (the top frame wins ties): job sites such as iCIMS
  *  render the posting, and its Apply link, inside an iframe. */
-async function act(tabId) {
+async function act(tabId, rules = RULES) {
   let peeks = [];
   try {
-    peeks = await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: probeApplyPage, args: [RULES, "peek"] });
+    peeks = await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: probeApplyPage, args: [rules, "peek"] });
   } catch {
     return null;
   }
@@ -462,15 +510,20 @@ async function act(tabId) {
   const done = seen.find((r) => r.result.ready || r.result.gone || r.result.gate);
   if (done) return done.result;
   const account = seen.some((r) => r.result.account);
+  const wall = seen.find((r) => r.result.botWall);
+  if (wall) return wall.result;
+  const embed = seen.find((r) => r.frameId === 0 && r.result.href);
+  if (embed) return embed.result;
+  const embedPending = seen.some((r) => r.result.embedPending);
   let best = null;
   for (const r of seen) {
     const c = r.result.candidate;
     if (!c) continue;
     if (!best || c.score > best.c.score || (c.score === best.c.score && r.frameId === 0)) best = { frameId: r.frameId, c };
   }
-  if (!best) return { ready: false, fields: 0, gone: false, ...(account ? { account } : {}) };
+  if (!best) return { ready: false, fields: 0, gone: false, ...(account ? { account } : {}), ...(embedPending ? { embedPending } : {}) };
   try {
-    const [res] = await chrome.scripting.executeScript({ target: { tabId, frameIds: [best.frameId] }, func: probeApplyPage, args: [RULES, true] });
+    const [res] = await chrome.scripting.executeScript({ target: { tabId, frameIds: [best.frameId] }, func: probeApplyPage, args: [rules, true] });
     const out = res && res.result;
     return out ? { ...out, ...(account ? { account } : {}) } : null;
   } catch {
@@ -505,6 +558,8 @@ const RENDER_WAIT_MS = 8000;
  */
 export async function reachApplicationForm(tabId, opts = {}) {
   const { onStep = () => {}, waitMs = 15_000, focus = null } = opts;
+  // The job title lets a careers page's link to this posting on an ATS count as the way in.
+  const rules = opts.jobTitle ? { ...RULES, jobTitle: String(opts.jobTitle) } : RULES;
   const steps = [];
   let account = false;
   let consents = 0;
@@ -513,6 +568,7 @@ export async function reachApplicationForm(tabId, opts = {}) {
     account = frames.some((f) => f.account);
     if (frames.some((f) => f.ready)) return { ready: true, gone: false, steps, tab: await chrome.tabs.get(tabId) };
     if (frames.some((f) => f.gone)) return { ready: false, gone: true, steps, tab: await chrome.tabs.get(tabId).catch(() => null) };
+    if (frames.some((f) => f.botWall)) return { ready: false, gone: false, botWall: true, steps, tab: await chrome.tabs.get(tabId).catch(() => null) };
     const gated = frames.find((f) => f.gate);
     if (gated) return { ready: false, gone: false, gate: gated.gate, steps, tab: await chrome.tabs.get(tabId).catch(() => null) };
     if (frames.some((f) => f.consent === "jobvite") && consents < 2) {
@@ -523,9 +579,21 @@ export async function reachApplicationForm(tabId, opts = {}) {
       try {
         const residence = await residenceText(opts.residence);
         const out = await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: passJobviteConsent, args: [residence] });
-        res = (out || []).map((r) => r && r.result).find((r) => r && (r.clicked || r.error)) || null;
+        const rs = (out || []).map((r) => r && r.result).filter(Boolean);
+        // Frames without the consent select answer "no consent select": the consent frame's answer wins.
+        res = rs.find((r) => r.clicked) || rs.find((r) => r.error && r.error !== "no consent select") || null;
       } catch {
         res = null;
+      }
+      if (!res) {
+        // The answer was lost: if the consent step is gone, Accept went through.
+        await sleep(1500);
+        await settled(tabId, 30_000);
+        const again = await probe(tabId, false);
+        if (!again.some((f) => f.consent === "jobvite")) {
+          steps.push("Accept data consent");
+          continue;
+        }
       }
       if (!res || !res.clicked) {
         const why = (res && res.error) || "the consent step could not be completed";
@@ -548,11 +616,13 @@ export async function reachApplicationForm(tabId, opts = {}) {
       // Single-page job sites draw the Apply button a while after the tab
       // reports loaded, so the first page gets time to render.
       const renderStart = Date.now();
-      const renderEnd = renderStart + (hop === 0 ? RENDER_WAIT_MS : 0);
+      let renderEnd = renderStart + (hop === 0 ? RENDER_WAIT_MS : 0);
       let shown = false;
       for (;;) {
-        action = await act(tabId);
-        if (action && (action.ready || action.gone || action.href || action.clicked)) break;
+        action = await act(tabId, rules);
+        if (action && (action.ready || action.gone || action.href || action.clicked || action.botWall)) break;
+        // An embedded board (Greenhouse) whose frame has not loaded yet: give it longer.
+        if (action && action.embedPending) renderEnd = Math.max(renderEnd, renderStart + 20_000);
         if (Date.now() >= renderEnd) break;
         if (focus && !shown && Date.now() - renderStart >= FOCUS_AFTER_MS) {
           shown = true;
@@ -564,6 +634,7 @@ export async function reachApplicationForm(tabId, opts = {}) {
       setTimeout(() => chrome.tabs.onCreated.removeListener(onCreated), 3000);
     }
     if (action && action.ready) return { ready: true, gone: false, steps, tab: await chrome.tabs.get(tabId) };
+    if (action && action.botWall) return { ready: false, gone: false, botWall: true, steps, tab: await chrome.tabs.get(tabId).catch(() => null) };
     if (action && action.gate) return { ready: false, gone: false, gate: action.gate, steps, tab: await chrome.tabs.get(tabId) };
     if (action && action.gone) return { ready: false, gone: true, steps, tab: await chrome.tabs.get(tabId).catch(() => null) };
     if (action && action.account) account = true;

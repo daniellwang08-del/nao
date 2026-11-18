@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
-import { APPLY_ATTR, APPLY_TEXT, GONE_TEXT, GONE_URL, MIN_FORM_FIELDS, NOT_APPLY_TEXT, PROBE_RULES, isApplyText, isGoneText, probeApplyPage, reachApplicationForm } from "../src/applyForm.js";
+import { APPLY_ATTR, APPLY_TEXT, ATS_HOST, GONE_TEXT, GONE_URL, MIN_FORM_FIELDS, NOT_APPLY_TEXT, PROBE_RULES, isApplyText, isGoneText, probeApplyPage, reachApplicationForm } from "../src/applyForm.js";
 import { CLOSED_UNSUBMITTED, closedWithoutSubmit } from "../src/autoapply/model.js";
 
-const RULES = { applyText: APPLY_TEXT, notApplyText: NOT_APPLY_TEXT, applyAttr: APPLY_ATTR, minFields: MIN_FORM_FIELDS, goneText: GONE_TEXT, goneUrl: GONE_URL };
+const RULES = { applyText: APPLY_TEXT, notApplyText: NOT_APPLY_TEXT, applyAttr: APPLY_ATTR, minFields: MIN_FORM_FIELDS, goneText: GONE_TEXT, goneUrl: GONE_URL, atsHost: ATS_HOST };
 
 test("apply button text", () => {
   for (const t of ["Apply now", "APPLY", "Apply for this job", "Apply to this position", "Start application", "I'm interested", "Apply for Position"]) {

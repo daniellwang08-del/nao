@@ -179,6 +179,7 @@ export async function startAutofill({ tab: targetTab = null, headless = false, r
       if (!hop.tab) return fail("The application tab was closed.");
       if (hop.gone) return fail("This job posting is no longer available (expired, filled or removed).");
       if (hop.consentError) return fail(hop.consentError);
+      if (hop.botWall) return fail('This site is showing a "confirm you are human" check. Complete it on the page, then start autofill again.');
       if (!hop.ready && !(hop.gate && engine.platform === "icims")) {
         // iCIMS walks its own login and profile steps (prepareIcims writes the
         // portal login), so a page without the form yet is still its to handle.
@@ -1705,7 +1706,8 @@ async function runAutofillPass() {
         const positionKnown = stage.stepsPresent && stage.step > 0 && stage.total > 0;
         if (!positionKnown || stage.last) {
           ctx.needsUser.push({
-            cid: "icims-submit",
+            // Only a known last step is "ready to submit"; an unknown position is a page to check.
+            cid: positionKnown ? "icims-submit" : "icims-review",
             label: positionKnown
               ? `Final step (${stage.step} of ${stage.total}): ${stage.stepTitle || "Submit"}`
               : stage.stepTitle || "Submit this step",

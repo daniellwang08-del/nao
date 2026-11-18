@@ -1316,27 +1316,44 @@
       if (dom.setNativeValue) dom.setNativeValue(input, v);
       else input.value = v;
       input.dispatchEvent(new Event("input", { bubbles: true }));
+      // The geocoder searches on key events too.
+      try {
+        input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "a" }));
+        input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "a" }));
+      } catch {}
     };
-    for (const q of (queries || []).filter(Boolean)) {
+    const MANUAL = /manual|can.?t find|enter .*(location|address)|not listed/i;
+    const list = (q) => q.filter(Boolean);
+    const all = list(queries || []);
+    for (let qi = 0; qi < all.length; qi++) {
+      const q = all[qi];
       try {
         input.focus({ preventScroll: true });
       } catch {}
       setVal(q);
+      let manualOpt = null;
       const opt = await srWait(
         () => {
-          // Never the "enter it manually" fallback: it swaps the search for separate manual fields.
-          const opts = srDeepQuery(scope, '[role="option"]:not([aria-disabled="true"])').filter(
-            (o) => !/manual|can.?t find|enter .*(location|address)|not listed/i.test(srOptText(o))
-          );
-          return opts.length ? opts[0] : null;
+          // Never the "enter it manually" fallback while a real suggestion may come: it swaps the search for
+          // separate manual fields.
+          const opts = srDeepQuery(scope, '[role="option"]:not([aria-disabled="true"])');
+          manualOpt = opts.find((o) => MANUAL.test(srOptText(o))) || manualOpt;
+          const real = opts.filter((o) => !MANUAL.test(srOptText(o)));
+          return real.length ? real[0] : null;
         },
-        2500,
-        80
+        5000,
+        100
       );
       if (opt) {
         clickButton(opt);
         await srDelay(200);
         return true;
+      }
+      // The geocoder found nothing for the last query: the manual fields (country + free-text city) take it.
+      if (qi === all.length - 1 && manualOpt) {
+        clickButton(manualOpt);
+        await srDelay(300);
+        return "manual";
       }
       setVal(""); // clear before the next (shorter) query attempt
       await srDelay(150);
@@ -1421,11 +1438,19 @@
     }
     // City-search mode.
     const target = cityInput || inputs[0];
-    const picked = await srTypePick(target, srLocQueries(loc));
+    let picked = await srTypePick(target, srLocQueries(loc));
+    if (!picked) {
+      // No suggestions and no manual option in the list: SmartRecruiters' own "enter manually" switch, if shown.
+      const sw = srDeepOne(host, '[data-test*="switch-to-manual"], [data-test*="manual-location-switch"]:not([data-test*="autocomplete"])');
+      if (sw) {
+        clickButton(sw);
+        picked = "manual";
+      }
+    }
     // Manual mode renders a moment after a pick switches to it.
     await srWait(() => srDeepOne(host, '[data-test="manual-location-country"]') || (clean(target.value) && target.getAttribute("aria-expanded") !== "true"), 2500, 100);
     const after = await srFillManualLocation(host, parts);
-    return after !== null ? after : picked;
+    return after !== null ? after : picked === true;
   }
 
   // Fill a multi-line spl-textarea (Experience / Education Description) inside an

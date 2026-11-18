@@ -27,6 +27,7 @@ test("Jobvite consent: picks the Global policy and accepts", async () => {
   const p = consentPage(["Data Privacy Acknowledgement -- Global"]);
   const res = await passJobviteConsent();
   assert.equal(res.clicked, true);
+  await new Promise((r) => setTimeout(r, 100)); // Accept is clicked just after the result is returned
   assert.equal(p.sel.value, "p0");
   assert.equal(p.accept.clicks, 1);
   assert.ok(p.events.includes("change"));

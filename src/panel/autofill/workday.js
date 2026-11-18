@@ -493,6 +493,7 @@ export async function reachWorkdayForm(tabId, engine, email) {
   const jobTab = await chrome.tabs.get(tabId).catch(() => null);
   const jobUrl = (jobTab && jobTab.url) || "";
   let resetForThisJob = true;
+  let actedOnce = false; // a gate action was taken (Apply, Create Account, Sign In...)
   let creds = null;
   let last = "";
   let verified = false;
@@ -512,16 +513,26 @@ export async function reachWorkdayForm(tabId, engine, email) {
     await chrome.runtime.sendMessage({ type: "AUTOFILL_INJECT", tabId, engine: engine.scripts }).catch(() => null);
     let page = null;
     let res = null;
-    // Workday renders the posting and the account form a moment after load.
-    for (let i = 0; i < 12 && !stopped(); i++) {
+    // Workday renders the posting and the account form a moment after load; the sign-in page after Apply is slow.
+    for (let i = 0; i < 30 && !stopped(); i++) {
       res = await tabSend(tabId, { type: "WD_GATE", creds, toSignIn: wantSignIn, forgot: wantForgot }, 0).catch(() => null);
+      if (!res) {
+        // No answer: the page navigated after the engine was injected. Inject it into the new page.
+        await waitTabSettled(tabId);
+        await chrome.runtime.sendMessage({ type: "AUTOFILL_INJECT", tabId, engine: engine.scripts }).catch(() => null);
+      }
       page = res && res.page;
-      if (page) break;
-      await delay(700);
+      if (page && page !== "loading") break;
+      await delay(800);
     }
     wantSignIn = false;
     wantForgot = false;
-    if (!page || page === "form") return { ok: true };
+    if (page === "form") return { ok: true };
+    if (!page || page === "loading") {
+      // Nothing done yet: the step loop reads the page as before. After a click, an unknown page is not the form.
+      if (!actedOnce) return { ok: true };
+      return fail("Workday did not open the application or its sign-in page after Apply. Open it yourself, then press Fill again.");
+    }
     const acted = (res && res.acted) || "";
     const why = res && res.error ? ` Workday says: ${res.error}` : "";
 
@@ -644,6 +655,7 @@ export async function reachWorkdayForm(tabId, engine, email) {
       return fail(`${what}${why} Finish this page yourself, then press Fill again.`);
     }
     last = step;
+    actedOnce = true;
     setAutofill({ loopStatus: WD_STATUS[acted] || "Opening the application…" });
     await delay(2500);
   }
@@ -880,7 +892,12 @@ async function autoAdvanceWorkday(tabId, profile, resumeFile) {
     for (let i = 0; i < WD_MAX_STEPS; i++) {
       if (loopStopped()) return finishLoop("stopped");
 
-      const det = await tabSend(tabId, { type: "WD_DETECT" }, 0);
+      let det = await tabSend(tabId, { type: "WD_DETECT" }, 0).catch(() => null);
+      // The first step can render a few seconds after sign-in: look again before calling the page step-less.
+      for (let t = 0; i === 0 && !(det && det.step) && t < 8 && !loopStopped(); t++) {
+        await delay(1000);
+        det = await tabSend(tabId, { type: "WD_DETECT" }, 0).catch(() => null);
+      }
       const step = det && det.step;
       aaLog("outer detect", {
         i,
