@@ -381,7 +381,7 @@ async function handleWorkdayResolve(msg) {
 // step reloads the page, so this loop re-injects and asks the page for one
 // action at a time. One generated password serves every Workday tenant, so the
 // candidate can sign in anywhere with the same login.
-const WD_GATE_ROUNDS = 12;
+const WD_GATE_ROUNDS = 18;
 const WD_CREDENTIAL_HOST = "myworkdayjobs.com";
 
 async function workdayCredentials(email) {
@@ -426,8 +426,11 @@ async function passWorkdayGate(tabId, engine, profile) {
 
 const WD_LINK_WAIT_MS = 180_000;
 
-/** Poll the connected inbox for Workday's activation link to this tab's host. Returns { url } or { message }. */
-async function waitVerificationLink(tabId, since, stopped) {
+/**
+ * Poll the connected inbox for Workday's emailed link to this tab's host: the account activation link
+ * (kind "verify") or the password reset link (kind "reset"). Returns { url } or { message }.
+ */
+async function waitInboxLink(tabId, since, stopped, kind = "verify") {
   const tab = await chrome.tabs.get(tabId).catch(() => null);
   let host = "";
   try {
@@ -435,30 +438,55 @@ async function waitVerificationLink(tabId, since, stopped) {
   } catch {
     /* no host */
   }
-  const manual = "Workday sent a verification email. Open the link in it, sign in on this page, then press Fill again.";
+  const manual =
+    kind === "reset"
+      ? "Workday sent a password reset email. Open the link in it, set your password, sign in, then press Fill again."
+      : "Workday sent a verification email. Open the link in it, sign in on this page, then press Fill again.";
   if (!host) return { message: manual };
   const until = Date.now() + WD_LINK_WAIT_MS;
   while (Date.now() < until && !stopped()) {
-    const res = await api.getVerificationLink({ since, host }).catch(() => null);
+    const res = await api.getVerificationLink({ since, host, kind }).catch(() => null);
     if (res && res.connected === false) {
       return { message: `${manual} (Connect your inbox in NAO and it will do this for you.)` };
     }
     if (res && res.link) return { url: res.link };
-    await delay(8000);
+    await delay(6000);
   }
-  return { message: `No verification email from Workday arrived in 3 minutes. ${manual}` };
+  return { message: `No ${kind === "reset" ? "password reset" : "verification"} email from Workday arrived in 3 minutes. ${manual}` };
 }
 
-/** Click through to the application form. Returns { ok } or { ok: false, message }. */
+// Workday says the new password is not allowed (reused, too weak): a fresh one is generated once.
+const WD_PASSWORD_REJECTED = /previous|recent|history|already used|same as|requirement|must (contain|include|be)|too (short|weak)|not (meet|allowed)|invalid password/i;
+
+const WD_STATUS = {
+  apply: "Opening the application…",
+  applyManually: "Choosing Apply Manually…",
+  create: "Creating your Workday account…",
+  toSignIn: "Signing in to your Workday account…",
+  signIn: "Signing in to your Workday account…",
+  toForgot: "Your saved Workday password did not work. Resetting it…",
+};
+
+/**
+ * Click through to the application form: Apply → Apply Manually → Create Account or Sign In with the saved
+ * password. When the saved password does not work: Forgot your password? → Reset Password → the reset link from
+ * the connected inbox → set the saved password → Sign In → the application. Returns { ok } or { ok: false, message }.
+ */
 export async function reachWorkdayForm(tabId, engine, email) {
   const stopped = () => !state.autofill.active || state.autofill.loopStop;
+  const fail = (message) => ({ ok: false, message });
+  const userId = state.user && state.user.user_id;
   let creds = null;
   let last = "";
   let verified = false;
   let pending = 0; // rounds spent waiting for a signed-in session's application to load
   let reloaded = false;
   let wantSignIn = false; // next WD_GATE: switch Create Account to Sign In
+  let wantForgot = false; // next WD_GATE: open Forgot your password?
   let triedSignIn = false;
+  let triedForgot = false;
+  let resetDone = false;
+  let newPassword = false; // a fresh password was generated after Workday rejected the saved one
   // The verification email can only be newer than the account: before NAO made it, look back ten minutes.
   let accountAt = Date.now() / 1000 - 600;
   for (let round = 0; round < WD_GATE_ROUNDS; round++) {
@@ -469,37 +497,40 @@ export async function reachWorkdayForm(tabId, engine, email) {
     let res = null;
     // Workday renders the posting and the account form a moment after load.
     for (let i = 0; i < 12 && !stopped(); i++) {
-      res = await tabSend(tabId, { type: "WD_GATE", creds, toSignIn: wantSignIn }, 0).catch(() => null);
+      res = await tabSend(tabId, { type: "WD_GATE", creds, toSignIn: wantSignIn, forgot: wantForgot }, 0).catch(() => null);
       page = res && res.page;
       if (page) break;
       await delay(700);
     }
     wantSignIn = false;
+    wantForgot = false;
     if (!page || page === "form") return { ok: true };
+    const acted = (res && res.acted) || "";
+    const why = res && res.error ? ` Workday says: ${res.error}` : "";
+
     // Signed in, but the account form is still on screen: give the application time to load, then reload once.
-    if (res && res.acted === "pending") {
+    if (acted === "pending") {
       round--;
       if (pending++ < 8) {
         setAutofill({ loopStatus: "Opening the application…" });
         await delay(2000);
         continue;
       }
-      if (reloaded) return { ok: false, message: "Signed in to Workday, but the application did not open. Open it from the posting, then press Fill again." };
+      if (reloaded) return fail("Signed in to Workday, but the application did not open. Open it from the posting, then press Fill again.");
       reloaded = true;
       pending = 0;
       await chrome.tabs.reload(tabId).catch(() => null);
       await delay(3000);
       continue;
     }
+
     if (page === "verifyEmail") {
-      if (verified) {
-        return { ok: false, message: "Workday still asks to verify the email after its link was opened. Sign in on this page, then press Fill again." };
-      }
+      if (verified) return fail("Workday still asks to verify the email after its link was opened. Sign in on this page, then press Fill again.");
       // Workday emailed an activation link: take it from the connected inbox, open it, then sign in.
       setAutofill({ loopStatus: "Waiting for Workday's verification email…" });
-      const link = await waitVerificationLink(tabId, accountAt, stopped);
+      const link = await waitInboxLink(tabId, accountAt, stopped, "verify");
       if (stopped()) return { ok: false, stopped: true };
-      if (!link.url) return { ok: false, message: link.message };
+      if (!link.url) return fail(link.message);
       verified = true;
       setAutofill({ loopStatus: "Verifying your Workday account…" });
       await chrome.tabs.update(tabId, { url: link.url }).catch(() => null);
@@ -507,46 +538,92 @@ export async function reachWorkdayForm(tabId, engine, email) {
       last = "";
       continue;
     }
-    if ((page === "createAccount" || page === "signIn") && !(res && res.acted)) {
-      if (!creds) {
-        if (!email) return { ok: false, message: "Your profile has no email, so NAO cannot create the Workday account. Sign in yourself, then press Fill again." };
-        setAutofill({ loopStatus: "Creating your Workday account…" });
-        creds = await workdayCredentials(email);
-        accountAt = Date.now() / 1000;
-        setAutofill({ account: { login: creds.email, password: creds.password } });
+
+    // Every account page needs the login: the profile email and the password NAO saved for Workday.
+    if (["createAccount", "signIn", "forgotPassword", "resetPassword"].includes(page) && !creds) {
+      if (!email) return fail("Your profile has no email, so NAO cannot sign in to Workday. Sign in yourself, then press Fill again.");
+      creds = await workdayCredentials(email);
+      accountAt = Date.now() / 1000;
+      setAutofill({ account: { login: creds.email, password: creds.password } });
+      round--;
+      continue;
+    }
+
+    if (acted === "toForgot") {
+      setAutofill({ loopStatus: WD_STATUS.toForgot });
+      last = "";
+      await delay(2500);
+      continue;
+    }
+
+    if (page === "forgotPassword") {
+      if (acted !== "requestReset") return fail("Could not request a Workday password reset. Use Forgot your password? on this page, then press Fill again.");
+      if (res.error) return fail(`Workday did not send the password reset email.${why} Finish this page yourself, then press Fill again.`);
+      // The reset email can only be newer than this click (a few seconds of clock slack).
+      const requestedAt = Date.now() / 1000 - 10;
+      setAutofill({ loopStatus: "Waiting for Workday's password reset email…" });
+      const link = await waitInboxLink(tabId, requestedAt, stopped, "reset");
+      if (stopped()) return { ok: false, stopped: true };
+      if (!link.url) return fail(link.message);
+      setAutofill({ loopStatus: "Opening the password reset page…" });
+      await chrome.tabs.update(tabId, { url: link.url }).catch(() => null);
+      await delay(3000);
+      last = "";
+      continue;
+    }
+
+    if (page === "resetPassword") {
+      if (acted !== "reset") return fail("Could not set the new Workday password. Set it on this page, sign in, then press Fill again.");
+      if (res.error) {
+        if (!newPassword && WD_PASSWORD_REJECTED.test(res.error)) {
+          // Workday will not take the saved password here: save a fresh one and type that instead.
+          newPassword = true;
+          creds = { ...creds, password: await portalPasswordForNewAccount() };
+          await storage.saveAtsCredential(userId, WD_CREDENTIAL_HOST, { login: creds.email, password: creds.password }).catch(() => null);
+          setAutofill({ account: { login: creds.email, password: creds.password }, loopStatus: "Workday wants a different password. Saving a new one…" });
+          last = "";
+          continue;
+        }
+        return fail(`Workday did not accept the new password.${why} Set it on this page, sign in, then press Fill again.`);
+      }
+      resetDone = true;
+      setAutofill({ loopStatus: "Password reset. Signing in…" });
+      last = "";
+      await delay(2500);
+      continue;
+    }
+
+    const step = `${page}:${acted}`;
+    // Sign In with the saved password failed (an error, or the same page again): reset the password once.
+    if (page === "signIn" && acted === "signIn" && (res.error || step === last)) {
+      if (!triedForgot) {
+        triedForgot = true;
+        wantForgot = true;
+        last = "";
         continue;
       }
+      const after = resetDone ? " even after the password reset" : "";
+      return fail(`Workday did not accept the sign-in${after}.${why} Finish this page yourself, then press Fill again.`);
     }
-    const step = `${page}:${(res && res.acted) || ""}`;
     // Create Account pressed twice with no error and no progress: the account most likely exists already (an
     // earlier run made it). Sign in with the same saved password instead.
-    if (step === last && page === "createAccount" && !(res && res.error) && !triedSignIn && creds) {
+    if (step === last && page === "createAccount" && !(res && res.error) && !triedSignIn) {
       triedSignIn = true;
       wantSignIn = true;
       last = "";
-      setAutofill({ loopStatus: "Signing in to your Workday account…" });
+      setAutofill({ loopStatus: WD_STATUS.toSignIn });
       continue;
     }
-    if (step === last || !(res && res.acted)) {
-      const why = res && res.error ? ` Workday says: ${res.error}` : "";
+    if (step === last || !acted) {
       const what =
-        page === "signIn"
-          ? "Workday did not accept the sign-in."
-          : page === "createAccount"
-            ? "Workday did not create the account."
-            : "Could not open the Workday application.";
-      return { ok: false, message: `${what}${why} Finish this page yourself, then press Fill again.` };
+        page === "signIn" ? "Workday did not accept the sign-in." : page === "createAccount" ? "Workday did not create the account." : "Could not open the Workday application.";
+      return fail(`${what}${why} Finish this page yourself, then press Fill again.`);
     }
     last = step;
-    setAutofill({
-      loopStatus:
-        { apply: "Opening the application…", applyManually: "Choosing Apply Manually…", create: "Creating your Workday account…", toSignIn: "Signing in to your Workday account…", signIn: "Signing in to your Workday account…" }[
-          res.acted
-        ] || "Opening the application…",
-    });
+    setAutofill({ loopStatus: WD_STATUS[acted] || "Opening the application…" });
     await delay(2500);
   }
-  return { ok: false, message: "Could not reach the Workday application form. Open it yourself, then press Fill again." };
+  return fail("Could not reach the Workday application form. Open it yourself, then press Fill again.");
 }
 
 // Workday: fetch the canonical structured profile (respecting the user's

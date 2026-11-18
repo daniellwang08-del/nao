@@ -504,7 +504,39 @@
     return !!(visibleAid("signInContent") || visibleAid("verifyPassword") || visibleAid("signInSubmitButton"));
   }
 
+  // Visible password / email boxes on the account card.
+  function visiblePasswords() {
+    return D.qa('input[type="password"]').filter(D.isVisible);
+  }
+  function visibleEmailBox() {
+    return visibleAid("email") || D.qa('input[type="email"], input[autocomplete="username"]').find(D.isVisible) || null;
+  }
+  function accountCardText() {
+    const scope = visibleAid("signInContent") || document.body;
+    return ((scope && scope.innerText) || "").replace(/\s+/g, " ").slice(0, 1500);
+  }
+
+  // "Reset Password" page the emailed link opens: new password + confirm, no email box.
+  function isResetPasswordPage() {
+    if (/\/passwordreset\//i.test(location.pathname) && visiblePasswords().length >= 1) return true;
+    return visiblePasswords().length >= 2 && !visibleEmailBox() && /(reset|change|new) password/i.test(accountCardText());
+  }
+
+  // "Forgot Password" page: an email box and Reset Password, no password box.
+  function isForgotPasswordPage() {
+    if (visiblePasswords().length || !visibleEmailBox()) return false;
+    return /forgot (your )?password/i.test(accountCardText()) && !!actionButton(/^reset password$/i);
+  }
+
+  // A visible button (or Workday's click_filter overlay) by its label.
+  function actionButton(re) {
+    const nodes = D.qa('button, [role="button"], [data-automation-id="click_filter"], input[type="submit"]').filter(D.isVisible);
+    return nodes.find((b) => re.test(String(b.getAttribute("aria-label") || b.innerText || b.value || "").replace(/\s+/g, " ").trim())) || null;
+  }
+
   function gatePage() {
+    if (isResetPasswordPage()) return "resetPassword";
+    if (isForgotPasswordPage()) return "forgotPassword";
     if (isAccountPage()) {
       return visibleAid("verifyPassword") || visibleAid("createAccountSubmitButton") ? "createAccount" : "signIn";
     }
@@ -547,12 +579,13 @@
   }
 
   // After Create Account / Sign In: wait for Workday to move on (a single-page app: no page load to wait for).
-  async function awaitGateResult(page) {
+  // An error already on screen before the press (a stale notice) is not this press's result.
+  async function awaitGateResult(page, before = "") {
     for (const end = Date.now() + 15000; Date.now() < end; ) {
       await D.delay(500);
       if (signedIn() || gatePage() !== page) return "";
       const e = gateErrorText();
-      if (e) return e;
+      if (e && e !== before) return e;
     }
     return "";
   }
@@ -568,6 +601,47 @@
     if (page === "createAccount" && opts.toSignIn && visibleAid("signInLink")) {
       D.clickEl(visibleAid("signInLink"));
       out.acted = "toSignIn";
+      return out;
+    }
+    // The saved password did not work: Forgot your password? (Create Account links to Sign In first.)
+    if (opts.forgot && (page === "signIn" || page === "createAccount")) {
+      const link = visibleAid("forgotPasswordLink") || actionButton(/^forgot (your )?password\??$/i);
+      if (link) {
+        D.clickEl(link);
+        out.acted = "toForgot";
+      } else if (page === "createAccount" && visibleAid("signInLink")) {
+        D.clickEl(visibleAid("signInLink"));
+        out.acted = "toSignIn";
+      }
+      return out;
+    }
+    if (page === "forgotPassword") {
+      if (creds && creds.email) {
+        typeInto(visibleEmailBox(), creds.email);
+        await D.delay(300);
+        const btn = actionButton(/^reset password$/i);
+        if (btn) {
+          D.clickEl(btn);
+          out.acted = "requestReset";
+          await D.delay(2500);
+          out.error = gateErrorText() || "";
+        }
+      }
+      return out;
+    }
+    if (page === "resetPassword") {
+      if (creds && creds.password) {
+        const boxes = visiblePasswords();
+        typeInto(visibleAid("password") || boxes[0], creds.password);
+        typeInto(visibleAid("verifyPassword") || boxes[1] || boxes[0], creds.password);
+        await D.delay(300);
+        const btn = actionButton(/^(reset password|change password|save|submit|continue|update password)$/i);
+        if (btn) {
+          D.clickEl(btn);
+          out.acted = "reset";
+          out.error = await awaitGateResult("resetPassword", error);
+        }
+      }
       return out;
     }
     if (page === "posting") {
@@ -597,7 +671,7 @@
         typeInto(visibleAid("password"), creds.password);
         await D.delay(300);
         out.acted = pressSubmit("signInSubmitButton") ? "signIn" : null;
-        if (out.acted) out.error = (await awaitGateResult("signIn")) || out.error;
+        if (out.acted) out.error = await awaitGateResult("signIn", error);
       }
     }
     out.signedIn = signedIn();

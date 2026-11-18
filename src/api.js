@@ -308,8 +308,8 @@ export const getVerificationCode = ({ since, company, exclude, sender } = {}) =>
   );
 
 /** Latest emailed account-verification link to `host` received after `since` (unix seconds): { connected, link } */
-export const getVerificationLink = ({ since, host }) =>
-  apiFetch(`/mail/verification-link${qs({ since: Math.floor(since), host })}`, { timeoutMs: 60_000 });
+export const getVerificationLink = ({ since, host, kind = "verify" }) =>
+  apiFetch(`/mail/verification-link${qs({ since: Math.floor(since), host, kind })}`, { timeoutMs: 60_000 });
 
 /**
  * Before applying: { ok, reason, message, prior, inbox, inbox_syncing, checked_at }.
