@@ -3079,6 +3079,10 @@
             return adp.sendCodeByEmail(msg.email || "");
           case "AF_ADP_ENTER_CODE":
             return adp.enterCode(msg.code || "");
+          case "AF_ADP_RESEND_CODE":
+            return adp.resendCode();
+          case "AF_ADP_DROPDOWNS":
+            return adp.fillDropdowns(msg.address || {});
           case "AF_ADP_NEXT":
             return { ok: true, ...(await adp.next({ timeoutMs: msg.timeoutMs || 25000 })) };
           case "AF_ADP_ATTEST":
@@ -3113,16 +3117,15 @@
     // invisible hCaptcha), so the reply is usually lost to the navigation.
     if (msg.type === "AF_ICIMS_GATE_SUBMIT") {
       if (!AF.icims || !AF.icims.emailGateState || !AF.icims.emailGateState().gate) return false;
-      let pressed = false;
-      try {
-        pressed = !!AF.icims.submitEmailGate(msg.email);
-      } catch {
-        pressed = false;
-      }
-      try {
-        sendResponse({ ok: true, pressed: pressed ? 1 : 0 });
-      } catch {}
-      return false;
+      Promise.resolve()
+        .then(() => AF.icims.submitEmailGate(msg.email))
+        .catch(() => ({ pressed: false, why: "error" }))
+        .then((res) => {
+          try {
+            sendResponse({ ok: true, pressed: res && res.pressed ? 1 : 0, why: (res && res.why) || "" });
+          } catch {}
+        });
+      return true;
     }
     // iCIMS profile prep: address block, time zone and required work-experience
     // locations from the candidate's confirmed profile (see content/engine/icims.js).

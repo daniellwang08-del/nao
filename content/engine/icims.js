@@ -780,30 +780,50 @@
     const form = emailGateForm();
     if (!form) return { gate: false };
     const input = emailGateInput(form);
-    return { gate: true, email: clean(input && input.value), challenge: captchaChallengeShown() };
+    const btn = document.getElementById("enterEmailSubmitButton");
+    return {
+      gate: true,
+      email: clean(input && input.value),
+      challenge: captchaChallengeShown(),
+      // Next pressed and iCIMS is waiting on its invisible hCaptcha ("submitting" overlay on the button).
+      pending: !!(btn && btn.disabled && /loadingButtonOverlay/i.test(String(btn.className || ""))),
+      hidden: document.visibilityState === "hidden",
+    };
   }
 
   // Write the email (never over one the candidate typed) and press Next.
-  function submitEmailGate(email) {
+  // The email step's privacy / GDPR consent (Peraton: accept_privacy + accept_gdpr; Acentra: accept_gdpr) keeps Next
+  // disabled until ticked. Returns { pressed, why }.
+  async function submitEmailGate(email) {
     const form = emailGateForm();
     const input = form && emailGateInput(form);
-    if (!input) return false;
+    if (!input) return { pressed: false, why: "no email box" };
     if (!clean(input.value)) {
-      if (!clean(email) || !setField(input, clean(email))) return false;
+      if (!clean(email) || !setField(input, clean(email))) return { pressed: false, why: "the email could not be entered" };
+    }
+    for (const box of Array.from(form.querySelectorAll('input[type="checkbox"]'))) {
+      const consent = box.getAttribute("aria-required") === "true" || box.required || /^accept_(privacy|gdpr|terms)/i.test(box.id || "");
+      if (consent && !box.checked) {
+        try {
+          box.click();
+        } catch {}
+      }
     }
     let btn = null;
     try {
       btn = document.getElementById("enterEmailSubmitButton") || form.querySelector('input[type="submit"], button[type="submit"]');
     } catch {}
-    if (!btn) return false;
+    if (!btn) return { pressed: false, why: "no Next button" };
+    for (let i = 0; i < 20 && btn.disabled; i++) await new Promise((r) => setTimeout(r, 100));
+    if (btn.disabled) return { pressed: false, why: "Next stayed disabled" };
     try {
       btn.scrollIntoView({ block: "center" });
     } catch {}
     try {
       btn.click();
-      return true;
+      return { pressed: true };
     } catch {
-      return false;
+      return { pressed: false, why: "Next could not be clicked" };
     }
   }
 

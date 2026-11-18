@@ -601,6 +601,13 @@
       out.acted = "pending"; // signed in already; the application is still loading
       return out;
     }
+    // Some tenants (Highmark) open Sign In as a chooser: Google / LinkedIn / "Sign in with email". The email and
+    // password boxes appear after "Sign in with email" (the forgot-password link too).
+    if ((page === "signIn" || page === "createAccount") && !visiblePasswords().length && visibleAid("SignInWithEmailButton")) {
+      D.clickEl(visibleAid("SignInWithEmailButton"));
+      out.acted = "toEmailSignIn";
+      return out;
+    }
     if (page === "createAccount" && opts.toSignIn && visibleAid("signInLink")) {
       D.clickEl(visibleAid("signInLink"));
       out.acted = "toSignIn";

@@ -377,15 +377,22 @@ export async function passIcimsEmailGate(tabId, eng, ctx) {
     return { blocked: "Add your email to your profile, or type it on the page and click Next, then start autofill again." };
   }
   setAutofill({ runStatus: "Entering your email and continuing…" });
+  let replies = [];
   try {
-    await tabBroadcast(tabId, { type: "AF_ICIMS_GATE_SUBMIT", email });
+    replies = (await tabBroadcast(tabId, { type: "AF_ICIMS_GATE_SUBMIT", email })) || [];
   } catch {
     /* the page is navigating */
+  }
+  const answered = replies.filter((r) => r && r.ok);
+  if (answered.length && !answered.some((r) => r.pressed)) {
+    const why = answered.map((r) => r.why).find(Boolean) || "Next could not be pressed";
+    return { blocked: `iCIMS's email step could not be submitted (${why}). Tick its consent boxes, click Next, then start autofill again.` };
   }
   setAutofill({ fields: [], primaryFrameId: null });
   await delay(1500);
   const deadline = Date.now() + GATE_WAIT_MS;
   let asked = false;
+  let pendingSince = 0;
   while (Date.now() < deadline) {
     await reinjectEngine(tabId, eng);
     const gate = await icimsGateState(tabId);
@@ -401,13 +408,24 @@ export async function passIcimsEmailGate(tabId, eng, ctx) {
     } else if (gate.challenge && !asked) {
       asked = true;
       setAutofill({ runStatus: "iCIMS shows a quick check (hCaptcha). Complete it on the page and autofill continues." });
+    } else if (gate.pending && gate.hidden && !gate.challenge) {
+      // Next was pressed and hCaptcha's invisible check is not finishing in the background tab: the person's step.
+      pendingSince = pendingSince || Date.now();
+      if (Date.now() - pendingSince > 30_000) {
+        return {
+          blocked:
+            "iCIMS is running its human check (hCaptcha) on the email step and it did not finish in the background. Open the tab, complete the check if one shows, click Next, then start autofill again.",
+        };
+      }
+    } else {
+      pendingSince = 0;
     }
     await delay(1500);
   }
   return {
     blocked: asked
       ? "The iCIMS check was not completed. Complete it on the page, click Next, then start autofill again."
-      : "iCIMS did not open the application after the email step. If the page asks you to sign in (this email already has an account here), sign in, then start autofill again.",
+      : "iCIMS stayed on its email step after Next. Click Next on the page (sign in if it asks), then start autofill again.",
   };
 }
 
@@ -856,14 +874,17 @@ const ADP_INBOX_CHECK_MS = 30_000;
 const ADP_INBOX_CHECKS = 2;
 
 async function enterAdpCode(tabId, company, sentAtMs) {
-  const since = Math.floor(sentAtMs / 1000) - 5; // only mail sent after Send
-  const claim = `${(state.job && state.job.job_id) || "job"}:${Math.round(sentAtMs)}`;
+  let sentAt = sentAtMs;
+  let resent = false;
   const tried = [];
   // Emails take a while to arrive: check 30 s after Send and once more 30 s later (a code typed on the page in the
-  // meantime counts too). Still nothing: the candidate enters it.
+  // meantime counts too). ADP failing on its side ("Unexpected system error... try again") gets one more Verify with
+  // the same code, then one new code (Resend Code). Still nothing: the candidate enters it.
   for (let check = 1; check <= ADP_INBOX_CHECKS; check++) {
+    const since = Math.floor(sentAt / 1000) - 5; // only mail sent after Send
+    const claim = `${(state.job && state.job.job_id) || "job"}:${Math.round(sentAt)}`;
     setAutofill({ runStatus: `Waiting for ADP's verification code in your email (check ${check} of ${ADP_INBOX_CHECKS} in 30 s)…` });
-    const due = Math.max(sentAtMs + check * ADP_INBOX_CHECK_MS, Date.now() + (check === 1 ? 0 : ADP_INBOX_CHECK_MS));
+    const due = Math.max(sentAt + check * ADP_INBOX_CHECK_MS, Date.now() + (check === 1 ? 0 : ADP_INBOX_CHECK_MS));
     while (Date.now() < due) {
       const st = await adpStage(tabId);
       if (st && st.kind !== "otp-code") return { ok: true }; // the candidate entered it
@@ -871,21 +892,39 @@ async function enterAdpCode(tabId, company, sentAtMs) {
     }
     let res = null;
     try {
-      res = await api.getVerificationCode({ since, sender: "adp.com", claim, sentAt: sentAtMs / 1000, exclude: tried });
+      res = await api.getVerificationCode({ since, sender: "adp.com", claim, sentAt: sentAt / 1000, exclude: tried });
     } catch {
       res = null;
     }
     if (res && res.connected === false) break;
-    if (res && res.code) {
-      tried.push(res.code);
-      setAutofill({ runStatus: `Entering the code from ${res.from || "your email"}…` });
-      const r = await tabSend(tabId, { type: "AF_ADP_ENTER_CODE", code: res.code }, 0).catch(() => null);
+    if (!(res && res.code)) continue;
+    tried.push(res.code);
+    setAutofill({ runStatus: `Entering the code from ${res.from || "your email"}…` });
+    let r = await tabSend(tabId, { type: "AF_ADP_ENTER_CODE", code: res.code }, 0).catch(() => null);
+    if (r && r.ok) return { ok: true };
+    // Verify loads a new page, so the answer is often lost: the page itself says whether the code went through.
+    let after = await adpStage(tabId);
+    if (after && after.kind !== "otp-code") return { ok: true };
+    if (r && r.retryable) {
+      setAutofill({ runStatus: `ADP says: ${r.error} Trying Verify again…` });
+      await delay(3000);
+      r = await tabSend(tabId, { type: "AF_ADP_ENTER_CODE", code: res.code }, 0).catch(() => null);
       if (r && r.ok) return { ok: true };
-      // Verify loads a new page, so the answer is often lost: the page itself says whether the code went through.
-      const after = await adpStage(tabId);
+      after = await adpStage(tabId);
       if (after && after.kind !== "otp-code") return { ok: true };
-      setAutofill({ runStatus: "That code was not accepted…" });
     }
+    if (!resent) {
+      // A new code: ADP voids the old one, and the claim restarts from the new Send.
+      const rs = await tabSend(tabId, { type: "AF_ADP_RESEND_CODE" }, 0).catch(() => null);
+      if (rs && rs.ok) {
+        resent = true;
+        sentAt = rs.sentAt || Date.now();
+        check = 0;
+        setAutofill({ runStatus: `ADP did not take the code${r && r.error ? ` (${r.error})` : ""}. Asked ADP for a new one…` });
+        continue;
+      }
+    }
+    setAutofill({ runStatus: `That code was not accepted${r && r.error ? `: ${r.error}` : ""}…` });
   }
   // No inbox (or no code): the candidate enters it; continue as soon as the page moves on.
   setAutofill({ runStatus: "Enter the verification code from your email on the page. Autofill continues after Verify." });
@@ -896,6 +935,18 @@ async function enterAdpCode(tabId, company, sentAtMs) {
     await delay(2000);
   }
   return { blocked: "Enter the verification code ADP emailed you and click Verify, then start autofill again. Connect your inbox in NAO to have this done for you." };
+}
+
+/** ADP's own State / Country dropdowns, from the profile address, before a step is filled. */
+export async function adpDropdowns(tabId, ctx) {
+  try {
+    const profile = await icimsProfile(ctx);
+    const a = (profile && profile.address) || {};
+    if (!a.state && !a.country) return;
+    await tabSend(tabId, { type: "AF_ADP_DROPDOWNS", address: { state: a.state || "", country: a.country || "" } }, 0);
+  } catch {
+    /* the step's other fields still fill */
+  }
 }
 
 export async function adpNext(tabId) {

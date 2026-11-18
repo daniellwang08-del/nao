@@ -35,6 +35,7 @@ import {
   dayforceStage,
   prepareDayforce,
   adpAttest,
+  adpDropdowns,
   adpNext,
   adpStage,
   prepareAdp,
@@ -971,11 +972,13 @@ async function fillCurrentPage(tabId, eng, ctx, isFirstPage) {
 
     // Strip client-only fields (key, filled) before sending to the LLM. The
     // 'html' snapshot carries each control's options inline (DOM-with-options).
+    // Labels are clipped: a long screening question must not make the request fail (its full text is in html).
+    const clip = (t) => (typeof t === "string" && t.length > 600 ? t.slice(0, 599) + "…" : t);
     const apiSpecs = fresh.map((f) => ({
       handle: f.handle,
-      label: f.label,
+      label: clip(f.label),
       html: f.html,
-      controls: f.controls.map(({ key, filled, ...c }) => c),
+      controls: f.controls.map(({ key, filled, ...c }) => ({ ...c, label: clip(c.label) })),
     }));
 
     const freshCount = fresh.reduce((n, f) => n + f.controls.length, 0);
@@ -1514,6 +1517,7 @@ async function runAutofillPass() {
       !!oracleStart ||
       (dayforceStart && dayforceStart.kind === "submit") ||
       (adpStart && (adpStart.kind !== "wizard" || adpStart.step === "Review Your Application"));
+    if (adpStart && !skipFirstFill) await adpDropdowns(tabId, ctx);
     let lastSpecs = skipFirstFill ? [] : await fillCurrentPage(tabId, eng, ctx, true);
 
     // Oracle: section by section (Personal Info, Application Questions, Experience, More About You, ...). On each: the
@@ -1587,6 +1591,7 @@ async function runAutofillPass() {
         }
         const now = nav.stage || {};
         if (now.kind !== "wizard" || now.step === "Review Your Application") continue; // attest at the loop top; Review needs no input
+        await adpDropdowns(tabId, ctx);
         const ok = await rediscoverForm(tabId);
         if (!ok) break;
         lastSpecs = await fillCurrentPage(tabId, eng, ctx, false);

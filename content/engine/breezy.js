@@ -48,7 +48,12 @@
       const section =
         (el.closest && el.closest(".section, .questionnaire-section, .eeoc-form-container")) || null;
       if (section) {
-        const hdr = section.querySelector(".section-header h3");
+        // One section can hold several headers ("Work History", then "Education"): the control belongs to the last
+        // header before it, not the first in the section.
+        let hdr = null;
+        for (const h of Array.from(section.querySelectorAll(".section-header h3"))) {
+          if (h.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) hdr = h;
+        }
         if (hdr && section.contains(el) && !el.closest("li.question")) return titleFromH3(hdr);
 
         let prev = el.previousElementSibling;

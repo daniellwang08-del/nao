@@ -372,7 +372,13 @@ const onBoard = (url) => AGGREGATOR_HOSTS.some((h) => hostOf(url).endsWith(h));
  */
 async function leaveBoard(tab, job) {
   const via = job.snapshot && job.snapshot.apply_via;
-  if (!via) throw needsYou("This is a job board listing. Open the employer's application from it.");
+  if (!via) {
+    // Dice's Apply is its own Easy Apply behind a Dice sign-in: nothing to follow to the employer.
+    if (/(^|\.)dice\.com$/i.test(hostOf(tab.url))) {
+      throw needsYou("Dice applies through its own Easy Apply, which needs your Dice sign-in. Apply on Dice yourself.");
+    }
+    throw needsYou("This is a job board listing. Open the employer's application from it.");
+  }
   step(`Opening the employer's application from ${via}…`);
   const reached = await reachApplicationForm(tab.id, { onStep: step, waitMs: 25_000, focus: wakeTab });
   if (!reached.tab) throw new Stop("failed", "The application tab was closed.");
@@ -380,6 +386,7 @@ async function leaveBoard(tab, job) {
   if (reached.botWall) {
     throw needsYou(`${via} is showing a "confirm you are human" check. Open the job on ${via} yourself and press Apply there.`);
   }
+  if (reached.httpBlocked) throw needsYou(`${via} refused the request (blocked). Open the job on ${via} yourself later.`);
   if (onBoard(reached.tab.url)) {
     throw needsYou(`${via} did not open the employer's application. Open it from the page (signing in to ${via} may be needed).`);
   }
@@ -429,6 +436,7 @@ async function run(cfg) {
     tab = reached.tab;
     if (reached.gone) throw postingGone();
     if (reached.botWall) throw needsYou('This site is showing a "confirm you are human" check. Complete it on the page, then start again.');
+    if (reached.httpBlocked) throw needsYou("The site refused the request (403 Forbidden or too many requests). Open the job yourself later.");
     if (reached.consentError) throw needsYou(reached.consentError);
     if (!reached.ready && reached.account) throw needsYou(NEEDS_ACCOUNT_MESSAGE);
     if (!reached.ready && reached.steps.length) {

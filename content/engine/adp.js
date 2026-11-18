@@ -133,8 +133,17 @@
 
   function visibleErrors() {
     const out = [];
-    for (const e of deepAll(".vdl-validation-error, [role=alert], .error-message, .vdl-alert--error").filter(shown)) {
-      const t = textOf(e);
+    for (const e of deepAll(".mdf-label-error, .vdl-validation-error, [role=alert], .error-message, .vdl-alert--error, .experience-vdl-error-label").filter(shown)) {
+      // Information notes are not errors ("You are currently signed in with this email address..." is an sdf-alert
+      // of type info).
+      const kind = `${e.getAttribute("type") || ""} ${String(e.className || "")} ${(e.shadowRoot && e.shadowRoot.innerHTML.slice(0, 400)) || ""}`;
+      if (/status-info|\binfo\b/i.test(kind) && !/status-(error|warning)|\berror\b/i.test(kind)) continue;
+      // A validation group names its field through its label ("Home Phone Number is required").
+      let t = textOf(e);
+      if (e.classList && e.classList.contains("vdl-validation-error")) {
+        const lab = e.querySelector(".mdf-label-error, label");
+        t = lab ? textOf(lab) : t;
+      }
       if (t && t.length < 200 && !out.includes(t)) out.push(t);
     }
     return out.slice(0, 15);
@@ -163,7 +172,7 @@
       hasNext: !!button(/^next\b/i),
       submit: !!anyButton(/^submit$/i),
       challenge,
-      errors: kind === "wizard" || kind === "attest" || kind === "login" ? visibleErrors() : [],
+      errors: kind === "wizard" || kind === "attest" || kind === "login" || kind === "otp-code" ? visibleErrors() : [],
     };
   }
 
@@ -300,7 +309,61 @@
     const before = stage().key;
     verify.click();
     const st = await waitForChange(before, 25000);
-    return { ok: st.kind !== "otp-code", stage: st };
+    const error = st.kind === "otp-code" ? (st.errors || [])[0] || "" : "";
+    // "Unexpected system error has occurred. Please try again." is ADP failing, not the code being wrong.
+    return { ok: st.kind !== "otp-code", stage: st, error, retryable: /unexpected|try again|temporar/i.test(error) };
+  }
+
+  // "Resend Code" on the code step: ADP emails a new code.
+  async function resendCode() {
+    const b = document.getElementById("recruitment_login_resendOTP") || anyButton(/^resend( code)?$/i);
+    if (!b) return { ok: false, error: "No Resend Code on the page." };
+    b.click();
+    await delay(1500);
+    return { ok: true, sentAt: Date.now() };
+  }
+
+  // ADP's own dropdowns (wfn-dropdown-list > shadow sdf-select-simple, options "CA - California") that the generic
+  // drivers cannot see: State / Territory and Country from the profile address, only while still "Select one...".
+  async function fillDropdowns({ state = "", country = "" } = {}) {
+    const done = [];
+    const all = (root, sel) => {
+      const out = [...root.querySelectorAll(sel)];
+      for (const n of root.querySelectorAll("*")) if (n.shadowRoot) out.push(...all(n.shadowRoot, sel));
+      return out;
+    };
+    for (const host of deepAll("wfn-dropdown-list").filter(shown)) {
+      const simple = host.shadowRoot && host.shadowRoot.querySelector("sdf-select-simple");
+      const root = simple && simple.shadowRoot;
+      if (!root) continue;
+      const placeholder = root.querySelector("#select-placeholder");
+      if (!placeholder || !/select one/i.test(textOf(placeholder))) continue;
+      const lbId = host.getAttribute("aria-labelledby") || "";
+      const lb = lbId ? document.getElementById(lbId) : null;
+      const key = `${lb ? textOf(lb) : ""} ${host.id || ""}`;
+      const want = /state|territor|province/i.test(key) ? state : /country/i.test(key) ? country : "";
+      const w = clean(want).toLowerCase();
+      if (!w) continue;
+      const trigger = root.querySelector(".trigger-button, [role=button]");
+      if (trigger) trigger.click();
+      await delay(400);
+      const items = all(root, 'sdf-select-item[role="option"]');
+      const pick = items.find((it) => {
+        const a = clean(it.getAttribute("aria-label") || textOf(it)).toLowerCase();
+        const [code, name] = a.split(" - ");
+        return a === w || code === w || (name && name === w);
+      });
+      if (pick) {
+        pick.click();
+        done.push(clean(key));
+        await delay(300);
+      } else {
+        try {
+          document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+        } catch {}
+      }
+    }
+    return { ok: true, done };
   }
 
   // ── wizard ─────────────────────────────────────────────────────────────────
@@ -376,6 +439,5 @@
     applicationRoot,
     shouldSkipControl,
     visibleErrors,
-    STEP_NAMES,
-  };
+    STEP_NAMES, resendCode, fillDropdowns };
 })();

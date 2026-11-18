@@ -494,6 +494,7 @@ export async function reachWorkdayForm(tabId, engine, email) {
   const jobUrl = (jobTab && jobTab.url) || "";
   let resetForThisJob = true;
   let actedOnce = false; // a gate action was taken (Apply, Create Account, Sign In...)
+  let emailChooserClicks = 0; // "Sign in with email" pressed on a sign-in chooser
   let creds = null;
   let last = "";
   let verified = false;
@@ -525,8 +526,9 @@ export async function reachWorkdayForm(tabId, engine, email) {
       if (page && page !== "loading") break;
       await delay(800);
     }
+    const keepForgot = wantForgot && res && res.acted === "toEmailSignIn"; // the chooser came first: ask again
     wantSignIn = false;
-    wantForgot = false;
+    wantForgot = keepForgot;
     if (page === "form") return { ok: true };
     if (!page || page === "loading") {
       // Nothing done yet: the step loop reads the page as before. After a click, an unknown page is not the form.
@@ -625,6 +627,17 @@ export async function reachWorkdayForm(tabId, engine, email) {
       }
       setAutofill({ loopStatus: "Password reset. Signing in…" });
       await delay(2500);
+      continue;
+    }
+
+    if (acted === "toEmailSignIn") {
+      if (emailChooserClicks++ >= 2) {
+        return fail('Workday\'s "Sign in with email" did not open the sign-in form. Sign in yourself, then press Fill again.');
+      }
+      actedOnce = true;
+      round--;
+      setAutofill({ loopStatus: WD_STATUS.signIn });
+      await delay(1500);
       continue;
     }
 

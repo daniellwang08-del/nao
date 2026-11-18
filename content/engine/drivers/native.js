@@ -371,6 +371,10 @@
       };
     },
     isFilled(root) {
+      // A phone box prefilled with only its country code ("+1") is still empty.
+      if (String(root.type || "").toLowerCase() === "tel" || (root.classList && root.classList.contains("PhoneInputInput"))) {
+        return String(root.value || "").replace(/\D/g, "").length >= 7;
+      }
       return clean(root.value) !== "";
     },
     async write(root, answer) {

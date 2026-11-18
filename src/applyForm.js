@@ -294,11 +294,21 @@ export function probeApplyPage(rules, act) {
   try {
     const wallEl = document.querySelector("#captcha-container, .amzn-captcha-root, #challenge-form, #cf-challenge-running, #challenge-stage");
     const head = `${document.title || ""} ${text(document.querySelector("h1") || document.body || document.documentElement).slice(0, 200)}`;
-    if (!ready && (wallEl || /confirm you('| a)re (a )?human|verify you are human|just a moment\.\.\./i.test(head))) base.botWall = true;
+    if (
+      !ready &&
+      (wallEl ||
+        /confirm you('| a)re (a )?human|verify you are human|just a moment\.\.\.|detected suspicious behaviou?r|unusual (behaviou?r|activity|traffic)/i.test(head))
+    ) {
+      base.botWall = true;
+    }
+    const bodyText = String((document.body && document.body.innerText) || "").replace(/\s+/g, " ").trim();
+    if (!ready && bodyText.length < 300 && /^(403 forbidden|forbidden|access denied|429 too many requests|request blocked)\b/i.test(bodyText)) {
+      base.httpBlocked = true;
+    }
   } catch {
     /* ignore */
   }
-  if (ready || gone || gate || consent || base.botWall || !act) return base;
+  if (ready || gone || gate || consent || base.botWall || base.httpBlocked || !act) return base;
 
   // Lazy Turbo frames (Teamtailor's application form) wait for an IntersectionObserver that never fires in a
   // background tab: load them now.
@@ -357,9 +367,16 @@ export function probeApplyPage(rules, act) {
   if (!hit) {
     // A careers page listing jobs: the link to this posting on a known ATS (its text carries the job title).
     const n = (v) => String(v || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-    const want = n(rules.jobTitle);
-    if (want.length < 6 || !rules.atsHost) return base;
+    const STOP = new Set(
+      "a an and or the of for to in at with remote hybrid onsite on site us usa united states canada full time part contract apply".split(" ")
+    );
+    const words = (v) => n(v).split(" ").filter((w) => w.length > 1 && !STOP.has(w));
+    const wantW = words(rules.jobTitle);
+    if (wantW.length < 2 || /^untitled role$/i.test(String(rules.jobTitle || "")) || !rules.atsHost) return base;
     const ats = new RegExp(rules.atsHost, "i");
+    let best = null;
+    let bestScore = 0;
+    let atsLinks = 0;
     for (const a of deepAll("a[href], a[data-href]").filter(visible)) {
       let u;
       try {
@@ -368,12 +385,22 @@ export function probeApplyPage(rules, act) {
         continue;
       }
       if (!/^https?:$/.test(u.protocol) || !ats.test(u.hostname) || u.hostname === location.hostname) continue;
-      if (!(" " + n(a.innerText || a.textContent) + " ").includes(" " + want + " ")) continue;
-      const label = String(rules.jobTitle).slice(0, 60);
-      if (act === "peek") return { ...base, candidate: { label, score: 0.5 } };
-      return { ready: false, fields, label, href: u.href };
+      atsLinks++;
+      const full = String(a.innerText || a.textContent || "");
+      const all = new Set(words(full));
+      const head = words(full.split("\n").find((l) => l.trim()) || "");
+      const linkInTitle = head.length >= 2 && head.every((w) => wantW.includes(w));
+      const titleInLink = wantW.every((w) => all.has(w));
+      const score = linkInTitle || titleInLink ? 1 : wantW.filter((w) => all.has(w)).length / wantW.length;
+      if (score > bestScore) {
+        bestScore = score;
+        best = u;
+      }
     }
-    return base;
+    if (!best || (bestScore < 1 && !(atsLinks === 1 && bestScore >= 0.6))) return base;
+    const label = String(rules.jobTitle).slice(0, 60);
+    if (act === "peek") return { ...base, candidate: { label, score: 0.5 } };
+    return { ready: false, fields, label, href: best.href };
   }
   if (act === "peek") return { ...base, candidate: { label: hit.t, score: hit.score } };
   // In a sub-frame (iCIMS renders the job in #icims_content_iframe) the link is clicked in place.
@@ -510,7 +537,7 @@ async function act(tabId, rules = RULES) {
   const done = seen.find((r) => r.result.ready || r.result.gone || r.result.gate);
   if (done) return done.result;
   const account = seen.some((r) => r.result.account);
-  const wall = seen.find((r) => r.result.botWall);
+  const wall = seen.find((r) => r.result.botWall || r.result.httpBlocked);
   if (wall) return wall.result;
   const embed = seen.find((r) => r.frameId === 0 && r.result.href);
   if (embed) return embed.result;
@@ -569,6 +596,7 @@ export async function reachApplicationForm(tabId, opts = {}) {
     if (frames.some((f) => f.ready)) return { ready: true, gone: false, steps, tab: await chrome.tabs.get(tabId) };
     if (frames.some((f) => f.gone)) return { ready: false, gone: true, steps, tab: await chrome.tabs.get(tabId).catch(() => null) };
     if (frames.some((f) => f.botWall)) return { ready: false, gone: false, botWall: true, steps, tab: await chrome.tabs.get(tabId).catch(() => null) };
+    if (frames.some((f) => f.httpBlocked)) return { ready: false, gone: false, httpBlocked: true, steps, tab: await chrome.tabs.get(tabId).catch(() => null) };
     const gated = frames.find((f) => f.gate);
     if (gated) return { ready: false, gone: false, gate: gated.gate, steps, tab: await chrome.tabs.get(tabId).catch(() => null) };
     if (frames.some((f) => f.consent === "jobvite") && consents < 2) {
@@ -620,7 +648,7 @@ export async function reachApplicationForm(tabId, opts = {}) {
       let shown = false;
       for (;;) {
         action = await act(tabId, rules);
-        if (action && (action.ready || action.gone || action.href || action.clicked || action.botWall)) break;
+        if (action && (action.ready || action.gone || action.href || action.clicked || action.botWall || action.httpBlocked)) break;
         // An embedded board (Greenhouse) whose frame has not loaded yet: give it longer.
         if (action && action.embedPending) renderEnd = Math.max(renderEnd, renderStart + 20_000);
         if (Date.now() >= renderEnd) break;
@@ -635,6 +663,7 @@ export async function reachApplicationForm(tabId, opts = {}) {
     }
     if (action && action.ready) return { ready: true, gone: false, steps, tab: await chrome.tabs.get(tabId) };
     if (action && action.botWall) return { ready: false, gone: false, botWall: true, steps, tab: await chrome.tabs.get(tabId).catch(() => null) };
+    if (action && action.httpBlocked) return { ready: false, gone: false, httpBlocked: true, steps, tab: await chrome.tabs.get(tabId).catch(() => null) };
     if (action && action.gate) return { ready: false, gone: false, gate: action.gate, steps, tab: await chrome.tabs.get(tabId) };
     if (action && action.gone) return { ready: false, gone: true, steps, tab: await chrome.tabs.get(tabId).catch(() => null) };
     if (action && action.account) account = true;
@@ -672,13 +701,19 @@ export async function reachApplicationForm(tabId, opts = {}) {
       if (!tab) return { ready: false, gone: false, steps, tab: null };
       if (tab.status !== "complete") continue;
       const now = await probe(tabId, false);
-      if (now.some((f) => f.ready || f.gone || f.account || f.gate || f.consent)) break;
+      if (now.some((f) => f.ready || f.gone || f.account || f.gate || f.consent || f.botWall || f.httpBlocked)) break;
     }
   }
   const tab = await chrome.tabs.get(tabId).catch(() => null);
   // The same Apply clicked again and again opened nothing: a stray sign-in box elsewhere on the
   // page (an employee "Log in") is not the reason, so report the failed click instead.
   const stuck = steps.length >= 2 && steps[steps.length - 1] === steps[steps.length - 2];
+  try {
+    const u = new URL((tab && tab.url) || "");
+    if (/^signin[-.]/i.test(u.hostname) || /\/(authorize|u\/login)(\/|$)/i.test(u.pathname)) account = true;
+  } catch {
+    /* no URL */
+  }
   if (account && !stuck) return { ready: false, gone: false, account: true, steps, tab };
   return { ready: false, gone: !!tab && (await jobGone(tabId, GONE_WAIT_MS)), steps, tab };
 }
