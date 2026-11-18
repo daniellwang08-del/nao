@@ -119,6 +119,7 @@ const ENGINE_SCRIPTS = {
   // the platform-agnostic component drivers.
   greenhouse: [
     "content/engine/timers.js",
+    "content/engine/input-values.js",
     "content/engine/dom.js",
     "content/engine/greenhouse.js",
     "content/engine/pinpoint.js",
@@ -391,7 +392,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         try {
           await chrome.scripting.executeScript({
             target: { tabId: msg.tabId, allFrames: true },
-            files: ["content/engine/page-bridge.js"],
+            files: ["content/engine/input-values.js", "content/engine/page-bridge.js"],
             world: "MAIN",
           });
         } catch (err) {

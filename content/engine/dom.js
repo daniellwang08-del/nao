@@ -135,8 +135,14 @@
     return window.HTMLInputElement.prototype;
   }
 
+  // Typed inputs only accept their own format (date: yyyy-MM-dd, number: digits): see input-values.js.
+  function inputValue(el, value) {
+    const v = value == null ? "" : String(value);
+    return typeof globalThis.__NAO_inputValueFor === "function" ? globalThis.__NAO_inputValueFor(el, v) : v;
+  }
+
   function setNativeValue(el, value) {
-    const valueStr = value == null ? "" : String(value);
+    const valueStr = inputValue(el, value);
     const proto = valueProto(el);
     let protoSetter = null;
     let ownSetter = null;
@@ -185,7 +191,7 @@
   // absent. Returns true when a write was attempted.
   function setReactTextValue(el, value) {
     if (!el || (el.tagName !== "INPUT" && el.tagName !== "TEXTAREA")) return false;
-    const v = value == null ? "" : String(value);
+    const v = inputValue(el, value);
 
     // 1) MAIN-world bridge (synchronous listener during dispatchEvent).
     try {
@@ -783,7 +789,10 @@
   function cleanForLLM(node, maxLen = 60000) {
     let html = "";
     try {
-      const clone = node.cloneNode(true);
+      // Copied into an inert document: no custom-element code runs, and the page's own odd input values (a React
+      // date field whose value attribute reads "undefined") are not re-parsed in the page's console.
+      const inert = document.implementation.createHTMLDocument("");
+      const clone = inert.importNode(node, true);
       clone.querySelectorAll(_CLEAN_REMOVE_SEL).forEach((e) => e.remove());
       const nodes = [clone, ...clone.querySelectorAll("*")];
       for (const el of nodes) {

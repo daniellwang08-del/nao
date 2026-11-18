@@ -76,7 +76,9 @@
 
   function setTextLike(el, value, { blur = true } = {}) {
     if (!el || (el.tagName !== "INPUT" && el.tagName !== "TEXTAREA")) return false;
-    const v = value == null ? "" : String(value);
+    const raw = value == null ? "" : String(value);
+    // Typed inputs only accept their own format (date: yyyy-MM-dd, number: digits): see input-values.js.
+    const v = typeof globalThis.__NAO_inputValueFor === "function" ? globalThis.__NAO_inputValueFor(el, raw) : raw;
     const setter = valueSetter(el);
     const last = el.value;
     try {
