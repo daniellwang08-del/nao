@@ -368,7 +368,48 @@
     }
   }
 
+  // With a known state, pick the suggestion that fits the profile's city AND state (shared with Greenhouse); a place
+  // in another state is never committed, and when the city is not listed the containing city or the state is used.
+  async function writeLocationByState(input, value) {
+    const M = AF.locationMatch;
+    const wanted = M.parseWantedLocation(value);
+    for (const { query, min } of M.locationAttempts(value)) {
+      await typeLocationQuery(input, query);
+      const items = await waitForLocationDropdown(input, 6000);
+      if (!items || !items.length) continue;
+      await delay(250);
+      const opts = locationDropdownItems(locationDropdownBox(input));
+      const index = M.pickLocationOption(opts.map((o) => clean(o.textContent)), wanted, min);
+      if (index < 0) continue;
+      const pick = opts[index];
+      // Lever commits on mousedown and reads the row's own id / text.
+      pick.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+      pick.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+      try {
+        pick.click();
+      } catch {}
+      if (await waitLocationCommitted(input, 1400)) {
+        input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+        return true;
+      }
+      for (let k = 0; k <= index; k++) {
+        pressKey(input, "ArrowDown", "ArrowDown", 40);
+        await delay(40);
+      }
+      pressKey(input, "Enter", "Enter", 13);
+      if (await waitLocationCommitted(input, 1200)) {
+        input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+        return true;
+      }
+    }
+    input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    return locationIsCommitted(input);
+  }
+
   async function writeLocationInput(input, value) {
+    if (input && AF.locationMatch && AF.locationMatch.parseWantedLocation(value).region) {
+      return writeLocationByState(input, value);
+    }
     const queries = leverLocationQueries(value);
     if (!input || !queries.length) return false;
 
