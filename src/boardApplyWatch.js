@@ -45,6 +45,18 @@ export function isApplyHop(boardUrl) {
   return /\/land\/ad\/\d/i.test(boardUrl) || /jobright\.ai\//i.test(boardUrl);
 }
 
+// Job boards an Apply hop can hand off to (Adzuna -> Dice): not the employer, but where the job really applies.
+const DESTINATION_BOARDS = /(?:^|\.)(?:linkedin|indeed|glassdoor|ziprecruiter|dice|simplyhired|monster|builtin|wellfound|careerbuilder|welcometothejungle|otta)\.com$/;
+
+export function isDestinationBoard(url) {
+  try {
+    const u = new URL(url);
+    return (u.protocol === "https:" || u.protocol === "http:") && DESTINATION_BOARDS.test(u.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
 export function isEmployerPage(url) {
   let u;
   try {
@@ -58,7 +70,7 @@ export function isEmployerPage(url) {
 }
 
 /**
- * @param {{ report: (boardUrl: string, url: string) => Promise<unknown>,
+ * @param {{ report: (boardUrl: string, url: string, pageTitle?: string) => Promise<unknown>,
  *           now?: () => number, settleMs?: number, chromeApi?: typeof chrome }} deps
  */
 export function attachBoardApplyWatch({ report, now = () => Date.now(), settleMs = SETTLE_MS, chromeApi = globalThis.chrome }) {
@@ -74,19 +86,21 @@ export function attachBoardApplyWatch({ report, now = () => Date.now(), settleMs
     setTimeout(async () => {
       if (watched.get(tabId) !== entry) return;
       let url = entry.landing;
+      let title = "";
       try {
         const tab = await chromeApi.tabs.get(tabId);
         if (tab?.url) url = tab.url;
+        title = tab?.title || "";
       } catch {
         // Tab closed: the landing seen at commit time is still the employer page.
       }
-      if (watched.get(tabId) !== entry || !isEmployerPage(url)) return;
+      if (watched.get(tabId) !== entry || !(isEmployerPage(url) || isDestinationBoard(url))) return;
       watched.delete(tabId);
       const key = entry.board + " " + url;
       if (reported.has(key)) return;
       reported.add(key);
       try {
-        await report(entry.board, url);
+        await report(entry.board, url, title);
       } catch {
         // Signed out, offline or rejected by the server: nothing to do.
       }
@@ -106,8 +120,9 @@ export function attachBoardApplyWatch({ report, now = () => Date.now(), settleMs
       watched.delete(tabId);
       return;
     }
-    // Tracking hops (another board, a redirector) keep the watch; the employer page reports after it settles.
-    if (!isEmployerPage(url)) return;
+    // Tracking hops (a redirector) keep the watch; the employer page, or another job board the Apply handed off to
+    // (Adzuna -> Dice), reports after it settles.
+    if (!isEmployerPage(url) && !isDestinationBoard(url)) return;
     if (!isApplyHop(entry.board)) {
       watched.delete(tabId);
       return;

@@ -388,9 +388,18 @@ async function leaveBoard(tab, job) {
   }
   if (reached.httpBlocked) throw needsYou(`${via} refused the request (blocked). Open the job on ${via} yourself later.`);
   if (onBoard(reached.tab.url)) {
+    // The board handed off to another job board (Adzuna -> Dice): tell NAO where this job really applies, so a
+    // user who restricted that site never gets it again; skip it now when they did.
+    const answer = await api.reportApplyUrl(job.job_id, reached.tab.url, reached.tab.title).catch(() => null);
+    if (answer && answer.restricted) {
+      throw skipped(`This job applies on ${answer.destination_label || answer.restricted}, a site you restricted.`);
+    }
+    if (/(^|\.)dice\.com$/i.test(hostOf(reached.tab.url))) {
+      throw needsYou("This job applies through Dice's own Easy Apply, which needs your Dice sign-in. Apply on Dice yourself.");
+    }
     throw needsYou(`${via} did not open the employer's application. Open it from the page (signing in to ${via} may be needed).`);
   }
-  await api.reportApplyUrl(job.job_id, reached.tab.url).catch(() => {});
+  await api.reportApplyUrl(job.job_id, reached.tab.url, reached.tab.title).catch(() => {});
   return reached.tab;
 }
 

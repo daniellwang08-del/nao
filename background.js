@@ -88,7 +88,7 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 // Adzuna/Jobright Apply clicks in this browser teach NAO the employer's application page.
-attachBoardApplyWatch({ report: (boardUrl, url) => api.reportApplyUrlFromBoard(boardUrl, url) });
+attachBoardApplyWatch({ report: (boardUrl, url, title) => api.reportApplyUrlFromBoard(boardUrl, url, title) });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === "complete" && tab.url && isDashboardUrl(tab.url)) {

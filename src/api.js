@@ -283,13 +283,20 @@ export const getScraperStats = (timezone) => apiFetch(`/scraper/stats${qs({ time
 // ── applications ─────────────────────────────────────────────────────────────
 
 export const listSessions = (status, limit = 100) => apiFetch(`/assistant/sessions${qs({ status, limit })}`);
-/** The employer's application page a board job (Adzuna, Jobright) led to in this browser. */
-export const reportApplyUrl = (jobId, url) =>
-  apiFetch(`/jobs/${encodeURIComponent(jobId)}/apply-url`, { method: "POST", body: { url } });
+/** The page a board job (Adzuna, Jobright) led to in this browser: the employer's application, or another job board
+ * (Dice, LinkedIn...). The answer says when it is a site the user restricted (`restricted`: its label). */
+export const reportApplyUrl = (jobId, url, pageTitle) =>
+  apiFetch(`/jobs/${encodeURIComponent(jobId)}/apply-url`, {
+    method: "POST",
+    body: { url, page_title: pageTitle ? String(pageTitle).slice(0, 500) : null },
+  });
 
-/** The user clicked Apply on a board job page (Adzuna, Jobright) and landed on the employer's page. */
-export const reportApplyUrlFromBoard = (boardUrl, url) =>
-  apiFetch("/jobs/apply-url/from-board", { method: "POST", body: { board_url: boardUrl, url } });
+/** The user clicked Apply on a board job page (Adzuna, Jobright) and landed on the employer's page or another board. */
+export const reportApplyUrlFromBoard = (boardUrl, url, pageTitle) =>
+  apiFetch("/jobs/apply-url/from-board", {
+    method: "POST",
+    body: { board_url: boardUrl, url, page_title: pageTitle ? String(pageTitle).slice(0, 500) : null },
+  });
 
 export const openSession = (jobId, { fresh = true } = {}) =>
   apiFetch(`/assistant/sessions/${encodeURIComponent(jobId)}/open`, { method: "POST", body: { fresh } });

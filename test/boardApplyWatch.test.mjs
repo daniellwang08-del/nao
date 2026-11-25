@@ -103,3 +103,26 @@ test("Jobright Apply goes straight to the employer", async () => {
   await w.settle();
   assert.deepEqual(w.reports, [[jr, "https://jobs.lever.co/acme/1"]]);
 });
+
+test("an Apply that hands off to another job board (Adzuna -> Dice) is reported with the page title", async () => {
+  const listeners = { commit: [], created: [], removed: [] };
+  const chromeApi = {
+    webNavigation: {
+      onCommitted: { addListener: (fn) => listeners.commit.push(fn) },
+      onCreatedNavigationTarget: { addListener: (fn) => listeners.created.push(fn) },
+    },
+    tabs: {
+      onRemoved: { addListener: (fn) => listeners.removed.push(fn) },
+      get: async (id) => ({ id, url: DICE, title: "Sr. Scala Developer - MHK TECH INC | Dice.com" }),
+    },
+  };
+  const DICE = "https://www.dice.com/job-applications/00c5a033-cf7d-4f69-8fab-7cea70e34f43/wizard";
+  const reports = [];
+  attachBoardApplyWatch({ report: async (b, u, t) => reports.push([b, u, t]), now: () => 1000, settleMs: 5, chromeApi });
+  const fire = (url, q = []) => listeners.commit.forEach((fn) => fn({ tabId: 7, frameId: 0, url, transitionType: "link", transitionQualifiers: q }));
+  fire(LAND);
+  fire("https://click.appcast.io/track/abc", ["server_redirect"]); // a redirector keeps the watch
+  fire(DICE, ["server_redirect"]);
+  await new Promise((r) => setTimeout(r, 40));
+  assert.deepEqual(reports, [[LAND, DICE, "Sr. Scala Developer - MHK TECH INC | Dice.com"]]);
+});
